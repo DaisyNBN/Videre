@@ -58,6 +58,8 @@ class ScanService: NSObject, ObservableObject {
     private let rotationThresholdDegrees: Float = 15.0
     /// Position change threshold: 0.5 meters.
     private let positionChangeThreshold: Float = 0.5
+    /// Hard image budget per scan to avoid excessive backend image analysis spend.
+    private let maxImageKeyframesPerScan: Int = 24
 
     /// Dedupe ARKit mesh landmarks (meters).
     private var arkitLandmarkCentroids: [simd_float3] = []
@@ -69,6 +71,7 @@ class ScanService: NSObject, ObservableObject {
     private var lastKeyframePosition: simd_float3 = .zero
     private var lastKeyframeRotation: simd_quatf = simd_quatf()
     private var lastKeyframeCacheClearTime: Date = Date()
+    private var didLogKeyframeBudgetReached = false
 
     // ── Start ─────────────────────────────────────────
     func startScan(
@@ -92,6 +95,7 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframePosition   = .zero
         lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
+        didLogKeyframeBudgetReached = false
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
@@ -190,6 +194,14 @@ class ScanService: NSObject, ObservableObject {
             newRotation: simd_quatf,
             lastTime: TimeInterval,
             now: TimeInterval) -> Bool {
+
+        if keyframes.count >= maxImageKeyframesPerScan {
+            if !didLogKeyframeBudgetReached {
+                didLogKeyframeBudgetReached = true
+                print("Keyframe budget reached (\(maxImageKeyframesPerScan)); skipping additional image capture")
+            }
+            return false
+        }
         
         // Always capture for first keyframe
         if keyframes.isEmpty {
@@ -329,6 +341,10 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Capture keyframe image ────────────────────────
     private func captureKeyframe(frame: ARFrame) {
+        guard keyframes.count < maxImageKeyframesPerScan else {
+            return
+        }
+
         let t     = frame.camera.transform
         let pose  = CameraPose(
             x: t.columns.3.x,
@@ -394,6 +410,8 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Build payload ─────────────────────────────────
     private func buildPayload(endedAt: Date) -> ScanPayload {
+        let keyframesForUpload = constrainedKeyframesForUpload()
+
         ScanPayload(
             scanId:    scanId,
             userId:    userId,
@@ -412,7 +430,7 @@ class ScanService: NSObject, ObservableObject {
             ),
             points:         points,
             landmarks:      landmarks,
-            keyframes:      keyframes,
+            keyframes:      keyframesForUpload,
             depthSamples:   depthSamples,
             sequenceNumber: sequenceNumber,
             checksum:       buildChecksum(),
@@ -420,6 +438,34 @@ class ScanService: NSObject, ObservableObject {
             retryCount:     retryCount,
             idempotencyKey: "\(scanId)_\(sequenceNumber)"
         )
+    }
+
+    private func constrainedKeyframesForUpload() -> [Keyframe] {
+        guard keyframes.count > maxImageKeyframesPerScan else {
+            return keyframes
+        }
+
+        let stride = max(
+            1,
+            Int(ceil(Double(keyframes.count) / Double(maxImageKeyframesPerScan)))
+        )
+
+        var sampled = keyframes.enumerated().compactMap { index, frame in
+            index % stride == 0 ? frame : nil
+        }
+
+        if let last = keyframes.last,
+           sampled.last?.timestamp != last.timestamp {
+            sampled.append(last)
+        }
+
+        if sampled.count > maxImageKeyframesPerScan,
+           let last = sampled.last {
+            sampled = Array(sampled.prefix(maxImageKeyframesPerScan))
+            sampled[sampled.count - 1] = last
+        }
+
+        return sampled
     }
 
     // ── Upload payload to backend API ─────────────────
