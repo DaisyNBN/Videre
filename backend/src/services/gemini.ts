@@ -1,5 +1,5 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ImageAnnotatorClient } from "@google-cloud/vision";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { homedir } from "os";
@@ -223,7 +223,7 @@ export async function getGeminiNavResponse(
       throw new Error("Missing GEMINI_API_KEY");
     }
 
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     const prompt = buildPrompt(
       request.obstacles,
