@@ -21,6 +21,12 @@ class ScanService: NSObject, ObservableObject {
     @Published var keyframeCount: Int    = 0
     @Published var uploadStatus:  String = ""
     @Published var isUploading:   Bool   = false
+    @Published var backendScanId: String = ""
+    @Published var backendMapId: String = ""
+    @Published var backendRouteId: String = ""
+    @Published var aiDetectionsCount: Int = 0
+    @Published var mapLandmarks: [MapLandmarkRecord] = []
+    @Published var mapActionStatus: String = ""
 
     // ── Session data ──────────────────────────────────
     private var scanId:         String            = ""
@@ -78,11 +84,34 @@ class ScanService: NSObject, ObservableObject {
         landmarkCount       = 0
         keyframeCount       = 0
         uploadStatus        = "Scanning..."
+        backendScanId       = ""
+        backendMapId        = ""
+        backendRouteId      = ""
+        aiDetectionsCount   = 0
+        mapLandmarks        = []
+        mapActionStatus     = ""
+        APIService.shared.clearActiveRouteContext()
     }
 
     // ── Stop and upload ───────────────────────────────
     func stopScan() {
         guard isScanning else { return }
+
+        if landmarks.isEmpty {
+            // Backend currently requires at least one landmark.
+            let fallback = Landmark(
+                type: "unknown",
+                label: "auto-anchor",
+                x: currentPosition.x,
+                y: currentPosition.y,
+                z: currentPosition.z,
+                source: "user",
+                timestamp: currentMs()
+            )
+            landmarks.append(fallback)
+            landmarkCount = landmarks.count
+        }
+
         isScanning   = false
         isUploading  = true
         uploadStatus = "Uploading scan..."
@@ -328,32 +357,271 @@ class ScanService: NSObject, ObservableObject {
             return
         }
 
+        var finalStatus = "Upload failed"
+        var shouldIncrementRetry = false
+
         do {
             let result = try await APIService.shared
                 .callFunction(
                     name:    "ingest-scan",
                     payload: dict
                 )
-            await MainActor.run {
-                if let success = result["success"] as? Bool,
-                   success {
-                    uploadStatus = Constants.apiDryRun
-                        ? "Dry run — manifest logged, not sent"
-                        : "Upload complete"
-                } else {
-                    uploadStatus = "Upload failed"
-                    retryCount  += 1
+
+            let success = result["success"] as? Bool ?? false
+            if !success {
+                finalStatus = "Upload failed"
+                shouldIncrementRetry = true
+                await MainActor.run {
+                    isUploading = false
+                    uploadStatus = finalStatus
+                    retryCount += 1
+                    sequenceNumber += 1
                 }
-                isUploading = false
-                sequenceNumber += 1
+                return
             }
-        } catch {
+
+            if Constants.apiDryRun || (result["dryRun"] as? Bool ?? false) {
+                await MainActor.run {
+                    backendScanId = "dry-run"
+                    uploadStatus = "Dry run — manifest logged, not sent"
+                    isUploading = false
+                    sequenceNumber += 1
+                }
+                return
+            }
+
+            guard let scanData = result["data"] as? [String: Any],
+                  let scanId = scanData["id"] as? String,
+                  !scanId.isEmpty
+            else {
+                finalStatus = "Scan uploaded but no scan id returned"
+                shouldIncrementRetry = true
+                await MainActor.run {
+                    isUploading = false
+                    uploadStatus = finalStatus
+                    retryCount += 1
+                    sequenceNumber += 1
+                }
+                return
+            }
+
             await MainActor.run {
-                uploadStatus = "Error: \(error.localizedDescription)"
-                isUploading  = false
-                retryCount  += 1
+                backendScanId = scanId
+                uploadStatus = "Scan uploaded. Checking processing..."
+            }
+
+            let processing = try await APIService.shared.fetchScanProcessingStatus(scanId: scanId)
+            await MainActor.run {
+                uploadStatus = "Scan status: \(processing). Fetching detections..."
+            }
+
+            let detections = try await APIService.shared.fetchScanDetections(scanId: scanId)
+            await MainActor.run {
+                aiDetectionsCount = detections.count
+                uploadStatus = "Detections: \(detections.count). Creating map..."
+            }
+
+            let mapId = try await APIService.shared.createMapFromScan(
+                scanId: scanId,
+                roomName: roomName
+            )
+
+            let syncedLandmarks = await syncMapLandmarks(mapId: mapId)
+            let verificationSummary = try? await APIService.shared
+                .fetchMapVerificationSummary(mapId: mapId)
+            let pendingCount = verificationSummary?["pending"] as? Int ?? 0
+            let verifiedCount = verificationSummary?["verified"] as? Int ?? 0
+
+            await MainActor.run {
+                backendMapId = mapId
+                uploadStatus =
+                    "Map created. Synced \(syncedLandmarks) landmarks " +
+                    "(verified: \(verifiedCount), pending: \(pendingCount)). Building route..."
+            }
+
+            let fetchedMapLandmarks = try await APIService.shared.fetchMapLandmarks(mapId: mapId)
+            await MainActor.run {
+                mapLandmarks = fetchedMapLandmarks
+            }
+
+            let graph = try await APIService.shared.fetchMapGraph(mapId: mapId)
+            guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
+                finalStatus = "Map created, but graph has insufficient nodes for routing"
+                await MainActor.run {
+                    uploadStatus = finalStatus
+                    isUploading = false
+                    sequenceNumber += 1
+                }
+                return
+            }
+
+            let routeId = try await APIService.shared.generateRoute(
+                mapId: mapId,
+                startNodeId: startNodeId,
+                endNodeId: endNodeId
+            )
+
+            await MainActor.run {
+                backendRouteId = routeId
+            }
+
+            finalStatus = "Upload complete — map and route ready"
+        } catch {
+            finalStatus = "Error: \(error.localizedDescription)"
+            shouldIncrementRetry = true
+        }
+
+        await MainActor.run {
+            uploadStatus = finalStatus
+            isUploading  = false
+            if shouldIncrementRetry {
+                retryCount += 1
+            }
+            sequenceNumber += 1
+        }
+    }
+
+    private func selectRouteNodes(from nodes: [[String: Any]]) -> (String, String)? {
+        let nodeIds = nodes.compactMap { $0["id"] as? String }
+        guard !nodeIds.isEmpty else { return nil }
+
+        let startNodeId = nodes.first {
+            (($0["type"] as? String) ?? "").lowercased() == "start"
+        }?["id"] as? String ?? nodeIds.first!
+
+        let endNodeId = nodes.first {
+            (($0["type"] as? String) ?? "").lowercased() == "end"
+        }?["id"] as? String ?? nodeIds.last!
+
+        if startNodeId != endNodeId {
+            return (startNodeId, endNodeId)
+        }
+
+        if let alternateEnd = nodeIds.last(where: { $0 != startNodeId }) {
+            return (startNodeId, alternateEnd)
+        }
+
+        return nil
+    }
+
+    @MainActor
+    func refreshMapLandmarks() {
+        guard !backendMapId.isEmpty else {
+            mapActionStatus = "No map available yet"
+            return
+        }
+
+        mapActionStatus = "Refreshing landmarks..."
+
+        Task {
+            do {
+                let records = try await APIService.shared.fetchMapLandmarks(mapId: backendMapId)
+                await MainActor.run {
+                    mapLandmarks = records
+                    mapActionStatus = "Loaded \(records.count) landmarks"
+                }
+            } catch {
+                await MainActor.run {
+                    mapActionStatus = "Failed to refresh landmarks: \(error.localizedDescription)"
+                }
             }
         }
+    }
+
+    @MainActor
+    func verifyLandmark(
+            landmarkId: String,
+            approve: Bool,
+            notes: String = ""
+    ) {
+        guard !backendMapId.isEmpty else {
+            mapActionStatus = "No map available yet"
+            return
+        }
+
+        let verificationStatus = approve ? "verified" : "rejected"
+        mapActionStatus = "Submitting \(verificationStatus) verification..."
+
+        Task {
+            do {
+                try await APIService.shared.verifyLandmark(
+                    landmarkId: landmarkId,
+                    status: verificationStatus,
+                    notes: notes.isEmpty ? nil : notes
+                )
+
+                let records = try await APIService.shared.fetchMapLandmarks(mapId: backendMapId)
+                await MainActor.run {
+                    mapLandmarks = records
+                    mapActionStatus = "Landmark marked as \(verificationStatus)"
+                }
+            } catch {
+                await MainActor.run {
+                    mapActionStatus = "Verification failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func submitContribution(notes: String) {
+        guard !backendMapId.isEmpty else {
+            mapActionStatus = "No map available yet"
+            return
+        }
+
+        mapActionStatus = "Submitting contribution..."
+
+        let payload: [String: Any] = [
+            "scanId": backendScanId,
+            "routeId": backendRouteId,
+            "landmarkCount": landmarks.count,
+            "detectionCount": aiDetectionsCount,
+            "note": notes,
+        ]
+
+        Task {
+            do {
+                let result = try await APIService.shared.createMapContribution(
+                    mapId: backendMapId,
+                    contributionType: "landmark_review",
+                    payload: payload,
+                    notes: notes
+                )
+
+                await MainActor.run {
+                    mapActionStatus =
+                        "Contribution submitted (id: \(result.contributionId), status: \(result.status))"
+                }
+            } catch {
+                await MainActor.run {
+                    mapActionStatus = "Contribution failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func syncMapLandmarks(mapId: String) async -> Int {
+        var syncedCount = 0
+
+        for landmark in landmarks.prefix(25) {
+            do {
+                _ = try await APIService.shared.createMapLandmark(
+                    mapId: mapId,
+                    type: landmark.type,
+                    label: landmark.label,
+                    x: landmark.x,
+                    y: landmark.y,
+                    z: landmark.z,
+                    source: landmark.source
+                )
+                syncedCount += 1
+            } catch {
+                print("Landmark sync failed for \(landmark.label): \(error)")
+            }
+        }
+
+        return syncedCount
     }
 
     // ── Helpers ───────────────────────────────────────

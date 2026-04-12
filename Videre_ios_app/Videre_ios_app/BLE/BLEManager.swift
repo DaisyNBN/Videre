@@ -11,6 +11,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var statusMessage: String = "Looking for cane..."
     @Published var distanceCm:    Int    = 999
     @Published var zone:          Int    = 0
+    @Published var battery:       Int    = 100
+    @Published var crowdMode:     Bool   = false
     @Published var buzzerOn:      Bool   = true
     @Published var vibOn:         Bool   = true
     @Published var rawJSON:       String = ""
@@ -226,6 +228,49 @@ extension BLEManager: CBPeripheralDelegate {
 // ── JSON parsing ──────────────────────────────────────
 extension BLEManager {
 
+    private func intValue(
+            _ json: [String: Any],
+            keys: [String]) -> Int? {
+        for key in keys {
+            if let value = json[key] as? Int {
+                return value
+            }
+            if let value = json[key] as? NSNumber {
+                return value.intValue
+            }
+            if let value = json[key] as? String,
+               let parsed = Int(value) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
+    private func boolValue(
+            _ json: [String: Any],
+            keys: [String]) -> Bool? {
+        for key in keys {
+            if let value = json[key] as? Bool {
+                return value
+            }
+            if let value = json[key] as? NSNumber {
+                return value.boolValue
+            }
+            if let value = json[key] as? String {
+                let normalized = value.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).lowercased()
+                if normalized == "true" || normalized == "1" {
+                    return true
+                }
+                if normalized == "false" || normalized == "0" {
+                    return false
+                }
+            }
+        }
+        return nil
+    }
+
     private func parseJSON(_ raw: String) {
         guard
             let data = raw.data(using: .utf8),
@@ -234,6 +279,42 @@ extension BLEManager {
         else {
             print("JSON parse failed: \(raw)")
             return
+        }
+
+        var telemetryUpdated = false
+
+        if let distance = intValue(json, keys: ["distance_cm", "distanceCm", "distance"]) {
+            distanceCm = max(distance, 0)
+            telemetryUpdated = true
+        }
+
+        if let parsedZone = intValue(json, keys: ["zone", "alert_zone"]) {
+            zone = max(parsedZone, 0)
+            telemetryUpdated = true
+        }
+
+        if let parsedBattery = intValue(json, keys: ["battery", "battery_pct"]) {
+            battery = min(max(parsedBattery, 0), 100)
+            telemetryUpdated = true
+        }
+
+        if let parsedCrowdMode = boolValue(json, keys: ["crowd_mode", "crowdMode"]) {
+            crowdMode = parsedCrowdMode
+            telemetryUpdated = true
+        }
+
+        if let parsedBuzzer = boolValue(json, keys: ["buzzer_on", "buzzerOn"]) {
+            buzzerOn = parsedBuzzer
+            telemetryUpdated = true
+        }
+
+        if let parsedVibration = boolValue(json, keys: ["vib_on", "vibOn", "vibration_on"]) {
+            vibOn = parsedVibration
+            telemetryUpdated = true
+        }
+
+        if telemetryUpdated {
+            handleZoneAlert(zone)
         }
 
 

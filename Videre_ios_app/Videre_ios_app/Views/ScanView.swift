@@ -10,6 +10,7 @@ struct ScanView: View {
     @State private var showLandmarkSheet = false
     @State private var landmarkType      = "door"
     @State private var landmarkLabel     = ""
+    @State private var contributionNotes = ""
 
     let landmarkTypes = ["door", "stairs", "elevator",
                          "toilet", "exit", "hazard", "other"]
@@ -294,6 +295,132 @@ struct ScanView: View {
                             .foregroundColor(.secondary)
                     }
                     .padding(.horizontal, 20)
+
+                    if !scan.backendScanId.isEmpty {
+                        Text("Scan ID: \(scan.backendScanId)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
+
+                    if scan.aiDetectionsCount > 0 {
+                        Text("AI detections: \(scan.aiDetectionsCount)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
+
+                    if !scan.backendMapId.isEmpty {
+                        Text("Map ID: \(scan.backendMapId)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
+
+                    if !scan.backendRouteId.isEmpty {
+                        Text("Route ID: \(scan.backendRouteId)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
+
+                    if !scan.backendMapId.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Map review")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+
+                            HStack(spacing: 10) {
+                                Button {
+                                    scan.refreshMapLandmarks()
+                                } label: {
+                                    Text("Refresh landmarks")
+                                        .font(.system(size: 13, weight: .medium))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(Color.blue.opacity(0.1))
+                                        .cornerRadius(8)
+                                }
+
+                                Button {
+                                    scan.submitContribution(notes: contributionNotes)
+                                    contributionNotes = ""
+                                } label: {
+                                    Text("Submit contribution")
+                                        .font(.system(size: 13, weight: .medium))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                        .background(Color.green.opacity(0.1))
+                                        .cornerRadius(8)
+                                }
+                            }
+
+                            TextField("Contribution notes", text: $contributionNotes)
+                                .font(.system(size: 12))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color(.systemGray6))
+                                .cornerRadius(8)
+
+                            if !scan.mapActionStatus.isEmpty {
+                                Text(scan.mapActionStatus)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            ForEach(scan.mapLandmarks.prefix(5)) { landmark in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("\(landmark.label) [\(landmark.type)]")
+                                        .font(.system(size: 12, weight: .semibold))
+
+                                    Text(
+                                        "status: \(landmark.status)" +
+                                            (landmark.confidence != nil
+                                             ? ", confidence: \(String(format: "%.2f", landmark.confidence!))"
+                                             : "")
+                                    )
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.secondary)
+
+                                    HStack(spacing: 8) {
+                                        Button {
+                                            scan.verifyLandmark(
+                                                landmarkId: landmark.id,
+                                                approve: true,
+                                                notes: "Verified from iOS map review"
+                                            )
+                                        } label: {
+                                            Text("Verify")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .frame(maxWidth: .infinity)
+                                                .padding(.vertical, 8)
+                                                .background(Color.green.opacity(0.15))
+                                                .cornerRadius(8)
+                                        }
+
+                                        Button {
+                                            scan.verifyLandmark(
+                                                landmarkId: landmark.id,
+                                                approve: false,
+                                                notes: "Rejected from iOS map review"
+                                            )
+                                        } label: {
+                                            Text("Reject")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .frame(maxWidth: .infinity)
+                                                .padding(.vertical, 8)
+                                                .background(Color.red.opacity(0.15))
+                                                .cornerRadius(8)
+                                        }
+                                    }
+                                }
+                                .padding(10)
+                                .background(Color(.systemGray6))
+                                .cornerRadius(10)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                    }
                 }
 
                 Divider()

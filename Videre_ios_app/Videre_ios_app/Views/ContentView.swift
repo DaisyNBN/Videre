@@ -6,6 +6,9 @@ struct ContentView: View {
     @EnvironmentObject var lidar: LiDARService
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var navigation: NavigationContextService
+    @State private var lastNavigationInstruction: String = ""
+    @State private var lastNavigationMeta: String = ""
+    @State private var showCalibrationPopup: Bool = false
 
     var body: some View {
         ScrollView {
@@ -22,13 +25,22 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                     Spacer()
                     HStack(spacing: 4) {
-                        Image(systemName: "battery.100")
+                        Image(systemName: batteryIcon)
                             .font(.system(size: 13))
                             .foregroundColor(.green)
-                        Text("100%")
+                        Text("\(ble.battery)%")
                             .font(.system(size: 13))
                             .foregroundColor(.green)
                     }
+                    Button {
+                        showCalibrationPopup = true
+                    } label: {
+                        Image(systemName: "scope")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.blue)
+                            .padding(.leading, 8)
+                    }
+                    .accessibilityLabel("Open calibration debug popup")
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 50)
@@ -231,9 +243,24 @@ struct ContentView: View {
 
                 // ── Navigate API payload (matches backend NavRequest) ──
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Navigate payload")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
+                    HStack {
+                        Text("Navigate payload")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Menu {
+                            Button(showCalibrationPopup
+                                   ? "Hide calibration popup"
+                                   : "Show calibration popup") {
+                                showCalibrationPopup.toggle()
+                            }
+                        } label: {
+                            Label("Debug menu", systemImage: "ellipsis.circle")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .padding(.horizontal, 20)
 
                     Toggle(isOn: Binding(
                         get: { appState.walkState == .walking },
@@ -253,6 +280,25 @@ struct ContentView: View {
                             .padding(.horizontal, 20)
                     }
 
+                    Text("Nearby hazards (backend): \(navigation.nearbyHazardsCount)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 20)
+
+                    if !navigation.hazardPollStatus.isEmpty {
+                        Text(navigation.hazardPollStatus)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
+
+                    if !navigation.autoRerouteStatus.isEmpty {
+                        Text(navigation.autoRerouteStatus)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
+
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(navigatePayloadPretty)
                             .font(.system(size: 11, design: .monospaced))
@@ -266,11 +312,43 @@ struct ContentView: View {
                                 ble: ble,
                                 lidar: lidar,
                                 appState: appState)
-                            try? await APIService.shared
-                                .postNavigate(p)
+                            do {
+                                let response = try await APIService.shared
+                                    .postNavigate(p)
+
+                                await MainActor.run {
+                                    lastNavigationInstruction = response.instruction
+                                    let fallbackText = response.fallbackUsed ? "yes" : "no"
+                                    let distanceText: String = {
+                                        guard let distance = response.distanceToNextM else {
+                                            return "n/a"
+                                        }
+                                        return String(format: "%.1f m", distance)
+                                    }()
+
+                                    lastNavigationMeta =
+                                        "Urgency: \(response.urgency), " +
+                                        "Haptic: \(response.hapticPattern), " +
+                                        "Next: \(response.nextCheckpoint ?? "none"), " +
+                                        "Distance: \(distanceText), " +
+                                        "Fallback: \(fallbackText)"
+
+                                    let priority: VoiceService.Priority =
+                                        response.urgency == "high" ? .high : .normal
+                                    VoiceService.shared.speak(
+                                        response.instruction,
+                                        priority: priority
+                                    )
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    lastNavigationMeta =
+                                        "Navigation request failed: \(error.localizedDescription)"
+                                }
+                            }
                         }
                     } label: {
-                        Text("Log navigate to console")
+                        Text("Get backend guidance")
                             .font(.system(size: 14, weight: .medium))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
@@ -278,7 +356,29 @@ struct ContentView: View {
                             .cornerRadius(8)
                     }
                     .padding(.horizontal, 20)
-                    .accessibilityLabel("Log navigate payload to console")
+                    .accessibilityLabel("Request navigation guidance from backend")
+
+                    if let activeRouteId = APIService.shared.activeRouteId,
+                       !activeRouteId.isEmpty {
+                        Text("Active route: \(activeRouteId)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
+
+                    if !lastNavigationInstruction.isEmpty {
+                        Text(lastNavigationInstruction)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 20)
+                    }
+
+                    if !lastNavigationMeta.isEmpty {
+                        Text(lastNavigationMeta)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+                    }
                 }
                 .padding(.top, 16)
 
@@ -308,6 +408,9 @@ struct ContentView: View {
                 .padding(.bottom, 40)
             }
         }
+        .sheet(isPresented: $showCalibrationPopup) {
+            CalibrationDebugPopupView(navigation: navigation)
+        }
     }
 
     private var navigatePayloadPretty: String {
@@ -322,6 +425,19 @@ struct ContentView: View {
               let s = String(data: data, encoding: .utf8)
         else { return "{}" }
         return s
+    }
+
+    private var batteryIcon: String {
+        switch ble.battery {
+        case ...20:
+            return "battery.25"
+        case ...50:
+            return "battery.50"
+        case ...80:
+            return "battery.75"
+        default:
+            return "battery.100"
+        }
     }
 
     // ── Distance color ────────────────────────────────
@@ -392,5 +508,104 @@ struct ContentView: View {
             .cornerRadius(8)
         }
         .accessibilityLabel(title)
+    }
+}
+
+private struct CalibrationDebugPopupView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var navigation: NavigationContextService
+
+    private var snapshot: RouteCalibrationDebugSnapshot {
+        APIService.shared.calibrationDebugSnapshot(
+            latitude: navigation.latitude,
+            longitude: navigation.longitude
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Calibration") {
+                    row("Status", snapshot.active ? "Active" : "Inactive")
+                    row("Heading offset", formatDegrees(snapshot.headingOffsetDegrees))
+                    row("Meters per local unit", formatNumber(snapshot.metersPerUnit, decimals: 3))
+                    row("Anchor", formatAnchor)
+                }
+
+                Section("Route context") {
+                    row("Map ID", snapshot.mapId ?? "None")
+                    row("Route ID", snapshot.routeId ?? "None")
+                    row("Start node", snapshot.startNodeId ?? "None")
+                    row("End node", snapshot.endNodeId ?? "None")
+                    row("Route node count", "\(snapshot.routeNodeCount)")
+                }
+
+                Section("Nearest projected node") {
+                    row("Node ID", snapshot.nearestNodeId ?? "None")
+                    row("Distance", formatMeters(snapshot.nearestNodeDistanceM))
+                }
+
+                Section("Live context") {
+                    row(
+                        "Current location",
+                        "\(String(format: "%.6f", navigation.latitude)), \(String(format: "%.6f", navigation.longitude))"
+                    )
+                    row("Heading", formatDegrees(navigation.headingDegrees))
+                    row("Nearby hazards", "\(navigation.nearbyHazardsCount)")
+                    if !navigation.autoRerouteStatus.isEmpty {
+                        row("Reroute", navigation.autoRerouteStatus)
+                    }
+                    if !navigation.hazardPollStatus.isEmpty {
+                        row("Hazard polling", navigation.hazardPollStatus)
+                    }
+                }
+            }
+            .navigationTitle("Calibration Debug")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private var formatAnchor: String {
+        guard let lat = snapshot.anchorLat,
+              let lng = snapshot.anchorLng
+        else {
+            return "None"
+        }
+
+        return "\(String(format: "%.6f", lat)), \(String(format: "%.6f", lng))"
+    }
+
+    private func formatNumber(_ value: Double?, decimals: Int) -> String {
+        guard let value else { return "n/a" }
+        return String(format: "%.*f", decimals, value)
+    }
+
+    private func formatDegrees(_ value: Double?) -> String {
+        guard let value else { return "n/a" }
+        return String(format: "%.1f°", value)
+    }
+
+    private func formatMeters(_ value: Double?) -> String {
+        guard let value else { return "n/a" }
+        return String(format: "%.1f m", value)
+    }
+
+    @ViewBuilder
+    private func row(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(title)
+            Spacer(minLength: 16)
+            Text(value)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.trailing)
+                .font(.system(size: 13, design: .monospaced))
+        }
     }
 }

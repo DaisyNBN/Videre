@@ -14,10 +14,17 @@ final class NavigationContextService: NSObject, ObservableObject {
     /// Degrees 0–360, or 0 if unknown.
     @Published private(set) var headingDegrees: Double = 0
     @Published private(set) var locationAuthorized = false
+    @Published private(set) var nearbyHazardsCount = 0
+    @Published private(set) var hazardPollStatus = ""
+    @Published private(set) var autoRerouteStatus = ""
 
     var routeId: String = "demo-route"
 
     private let manager = CLLocationManager()
+    private var hazardPollTimer: Timer?
+    private var cachedHazardObstacles: [[String: Any]] = []
+    private var lastHazardSignature: String = ""
+    private var isRerouteInFlight = false
 
     override init() {
         super.init()
@@ -34,6 +41,11 @@ final class NavigationContextService: NSObject, ObservableObject {
         if CLLocationManager.headingAvailable() {
             manager.startUpdatingHeading()
         }
+        startHazardPolling()
+    }
+
+    deinit {
+        hazardPollTimer?.invalidate()
     }
 
     /// Mirrors `backend` `NavRequest` / your sample JSON.
@@ -42,21 +54,186 @@ final class NavigationContextService: NSObject, ObservableObject {
         lidar: LiDARService,
         appState: AppState
     ) -> [String: Any] {
+        APIService.shared.refineRouteGeoCalibration(
+            latitude: latitude,
+            longitude: longitude,
+            headingDegrees: headingDegrees
+        )
+
+        let selectedRouteId = APIService.shared.activeRouteId ?? routeId
         let speed: String =
             appState.walkState == .walking ? "walking" : "stopped"
+        var obstacles = Self.buildObstacles(
+            ble: ble,
+            lidar: lidar
+        )
+        obstacles.append(contentsOf: cachedHazardObstacles)
+
         return [
             "user_id":         DeviceIdentity.userId,
-            "route_id":        routeId,
+            "route_id":        selectedRouteId,
             "location":        [
                 "lat": latitude,
                 "lng": longitude
             ],
             "heading_degrees": headingDegrees,
-            "obstacles":       Self.buildObstacles(
-                ble: ble,
-                lidar: lidar),
+            "obstacles":       obstacles,
             "speed":           speed
         ]
+    }
+
+    private func startHazardPolling() {
+        guard hazardPollTimer == nil else { return }
+
+        hazardPollStatus = "Starting hazard polling..."
+        hazardPollTimer = Timer.scheduledTimer(
+            withTimeInterval: 12,
+            repeats: true,
+            block: { [weak self] _ in
+                self?.pollHazardsTick()
+            }
+        )
+
+        pollHazardsTick()
+    }
+
+    private func pollHazardsTick() {
+        Task {
+            await refreshNearbyHazards()
+        }
+    }
+
+    @MainActor
+    private func buildHazardObstacles(from hazards: [[String: Any]]) -> [[String: Any]] {
+        let current = CLLocation(latitude: latitude, longitude: longitude)
+
+        let enriched = hazards.compactMap { hazard -> (distance: Double, obstacle: [String: Any])? in
+            guard let hazardLat = hazard["lat"] as? Double,
+                  let hazardLng = hazard["lng"] as? Double
+            else {
+                return nil
+            }
+
+            let hazardLoc = CLLocation(latitude: hazardLat, longitude: hazardLng)
+            let meters = current.distance(from: hazardLoc)
+
+            let estimate: String
+            if meters < 40 {
+                estimate = "near"
+            } else if meters < 110 {
+                estimate = "mid"
+            } else {
+                estimate = "far"
+            }
+
+            let label = (hazard["type"] as? String)
+                ?? (hazard["description"] as? String)
+                ?? "hazard"
+
+            return (
+                meters,
+                [
+                    "label": label,
+                    "position": "center",
+                    "distance_estimate": estimate,
+                ]
+            )
+        }
+
+        return enriched
+            .sorted(by: { $0.distance < $1.distance })
+            .prefix(3)
+            .map { $0.obstacle }
+    }
+
+    @MainActor
+    private func hazardSignature(_ hazards: [[String: Any]]) -> String {
+        hazards
+            .compactMap { row in
+                guard let type = row["type"] as? String,
+                      let lat = row["lat"] as? Double,
+                      let lng = row["lng"] as? Double
+                else {
+                    return nil
+                }
+                return "\(type):\(String(format: "%.5f", lat)),\(String(format: "%.5f", lng))"
+            }
+            .sorted()
+            .joined(separator: "|")
+    }
+
+    @MainActor
+    private func maybeTriggerAutoRerouteIfNeeded(
+            hazards: [[String: Any]],
+            signature: String
+    ) {
+        guard !signature.isEmpty,
+              signature != lastHazardSignature,
+              APIService.shared.activeRouteId != nil,
+              !isRerouteInFlight
+        else {
+            lastHazardSignature = signature
+            return
+        }
+
+        isRerouteInFlight = true
+        let blockedNodeIds = APIService.shared.deriveBlockedNodeIdsFromHazards(
+            hazards: hazards,
+            maxCount: min(max(hazards.count, 1), 4),
+            thresholdMeters: 30
+        )
+
+        autoRerouteStatus = blockedNodeIds.isEmpty
+            ? "Hazards changed. Recomputing route..."
+            : "Hazards changed. Blocking \(blockedNodeIds.count) nodes and rerouting..."
+
+        Task {
+            do {
+                let routeId = try await APIService.shared.rerouteActiveRoute(
+                    reason: "Nearby hazards changed",
+                    obstacleNodeIds: blockedNodeIds,
+                    blockedNodeIds: blockedNodeIds
+                )
+
+                await MainActor.run {
+                    autoRerouteStatus = "Auto reroute completed: \(routeId)"
+                    isRerouteInFlight = false
+                    lastHazardSignature = signature
+                }
+            } catch {
+                await MainActor.run {
+                    autoRerouteStatus = "Auto reroute failed: \(error.localizedDescription)"
+                    isRerouteInFlight = false
+                    lastHazardSignature = signature
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func refreshNearbyHazards() async {
+        do {
+            let hazards = try await APIService.shared.fetchHazards(
+                lat: latitude,
+                lng: longitude,
+                radiusMeters: 120
+            )
+
+            nearbyHazardsCount = hazards.count
+            cachedHazardObstacles = buildHazardObstacles(from: hazards)
+            hazardPollStatus = "Hazards in range: \(hazards.count)"
+
+            APIService.shared.refineRouteGeoCalibration(
+                latitude: latitude,
+                longitude: longitude,
+                headingDegrees: headingDegrees
+            )
+
+            let signature = hazardSignature(hazards)
+            maybeTriggerAutoRerouteIfNeeded(hazards: hazards, signature: signature)
+        } catch {
+            hazardPollStatus = "Hazard polling failed: \(error.localizedDescription)"
+        }
     }
 
     /// `depthClearSide` = where LiDAR sees *more* open space; API `position` is
@@ -131,6 +308,10 @@ extension NavigationContextService: CLLocationManagerDelegate {
             if loc.course >= 0 {
                 self.headingDegrees = loc.course
             }
+        }
+
+        Task { @MainActor in
+            await self.refreshNearbyHazards()
         }
     }
 
