@@ -10,9 +10,18 @@ struct Constants {
     static let bleServiceUUID        = "FFE0"
     static let bleCharacteristicUUID = "FFE1"
 
-    /// No Supabase HTTP writes (edge fn, REST insert, storage). Logs instead.
-    static let supabaseDryRun = true
+    /// If true, API requests are logged but not sent.
+    static let apiDryRun = false
 
-    /// Dry-run log lines only — shape your Express API should match.
-    static let apiLogBaseURL = "http://localhost:3000/api"
+    /// Dry-run log lines only — shape your deployed Express API.
+    static let apiLogBaseURL: String = {
+        let trimmed = Secrets.apiURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let noTrailingSlash = trimmed.hasSuffix("/")
+            ? String(trimmed.dropLast())
+            : trimmed
+        return noTrailingSlash.hasSuffix("/api")
+            ? noTrailingSlash
+            : "\(noTrailingSlash)/api"
+    }()
 }

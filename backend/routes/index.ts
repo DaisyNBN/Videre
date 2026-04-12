@@ -17,12 +17,11 @@ router.use("/landmarks", landmarksRouter);
 
 // health check
 router.get("/health", (req: Request, res: Response) => {
-    res.json({
-        status: "ok",
+    res.json(new ApiResponse(true, "Server is healthy", {
         timestamp: new Date().toISOString(),
         supabase: !!process.env.SUPABASE_URL,
         gemini: !!process.env.GEMINI_API_KEY,
-    });
+    }));
 });
 
 router.get("/version", (_req: Request, res: Response) => {

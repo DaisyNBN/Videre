@@ -1,5 +1,5 @@
 //
-//  SupabaseService.swift
+//  APIService.swift
 //  Videre
 //
 //  Created by Ngan Nguyen on 4/12/26.
@@ -7,12 +7,22 @@
 
 import Foundation
 
-class SupabaseService {
+final class APIService {
 
-    static let shared = SupabaseService()
+    static let shared = APIService()
+    private init() {}
 
-    private let baseURL = Secrets.supabaseURL
-    private let anonKey = Secrets.supabaseAnonKey
+    private static let normalizedApiBaseURL = {
+        let trimmed = Secrets.apiURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let noTrailingSlash = trimmed.hasSuffix("/")
+            ? String(trimmed.dropLast())
+            : trimmed
+        return noTrailingSlash.hasSuffix("/api")
+            ? noTrailingSlash
+            : "\(noTrailingSlash)/api"
+    }()
+    private let apiBaseURL = APIService.normalizedApiBaseURL
 
     private static func jsonBlock(_ obj: Any) -> String {
         guard JSONSerialization.isValidJSONObject(obj),
@@ -24,9 +34,9 @@ class SupabaseService {
         return s
     }
 
-    /// Compact log: `POST …` + small JSON (not full Supabase URLs).
+    /// Compact log: `POST …` + small JSON.
     private static func logDryRunScan(_ payload: [String: Any]) {
-        let api  = Constants.apiLogBaseURL
+        let api  = Self.normalizedApiBaseURL
         let maxP = 6
         let maxL = 4
 
@@ -70,30 +80,8 @@ class SupabaseService {
     }
 
     private static func logDryRunHazard(_ payload: [String: Any]) {
-        let body: [String: Any] = [
-            "user_id":     payload["user_id"] as Any,
-            "lat":         payload["lat"] as Any,
-            "lng":         payload["lng"] as Any,
-            "type":        payload["type"] as Any,
-            "description": payload["label"] as Any
-        ]
-        print("POST \(Constants.apiLogBaseURL)/hazards")
-        print(jsonBlock(body))
-    }
-
-    private static func logDryRunSession(_ payload: [String: Any]) {
-        var body = payload
-        if let path = payload["path"] as? [[Double]], path.count > 3 {
-            var copy = payload
-            copy["path"] = Array(path.prefix(3))
-            body = copy
-            print("POST \(Constants.apiLogBaseURL)/sessions")
-            print(jsonBlock(body))
-            print("// omitted: \(path.count - 3) more path points")
-        } else {
-            print("POST \(Constants.apiLogBaseURL)/sessions")
-            print(jsonBlock(body))
-        }
+        print("POST \(Self.normalizedApiBaseURL)/hazards")
+        print(jsonBlock(payload))
     }
 
     // ── Generic edge function caller ──────────────────
@@ -102,141 +90,51 @@ class SupabaseService {
             payload: [String: Any]
     ) async throws -> [String: Any] {
 
-        let urlStr = "\(baseURL)/functions/v1/\(name)"
-        if Constants.supabaseDryRun {
-            if name == "ingest-scan" {
-                Self.logDryRunScan(payload)
-            } else {
-                print("POST \(Constants.apiLogBaseURL)/\(name)")
-                print(Self.jsonBlock(payload))
-            }
+        guard name == "ingest-scan" else {
+            throw NSError(
+                domain: "APIService",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Unsupported function \(name). Use explicit API methods."
+                ]
+            )
+        }
+
+        if Constants.apiDryRun {
+            Self.logDryRunScan(payload)
             return ["success": true, "dryRun": true]
         }
 
-        guard let url = URL(string: urlStr)
-        else {
+        return try await postScan(payload)
+    }
+
+    private func postScan(_ payload: [String: Any]) async throws -> [String: Any] {
+        let urlStr = "\(apiBaseURL)/scans"
+        guard let url = URL(string: urlStr) else {
             throw URLError(.badURL)
         }
 
-        var request        = URLRequest(url: url)
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue(
-            "application/json",
-            forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "Bearer \(anonKey)",
-            forHTTPHeaderField: "Authorization")
-        request.httpBody = try? JSONSerialization.data(
-                                    withJSONObject: payload)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        let (data, response) = try await URLSession
-                                            .shared
-                                            .data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
 
-        // check HTTP status
-        if let http = response as? HTTPURLResponse {
-            print("Function \(name) status: \(http.statusCode)")
-            if http.statusCode != 200 {
-                throw URLError(.badServerResponse)
-            }
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode)
+        else {
+            throw URLError(.badServerResponse)
         }
 
         guard let json = try? JSONSerialization
-                             .jsonObject(with: data)
-                             as? [String: Any]
+            .jsonObject(with: data) as? [String: Any]
         else {
             throw URLError(.cannotParseResponse)
         }
 
         return json
-    }
-
-    // ── Read from a table ─────────────────────────────
-    func select(
-            table: String,
-            query: String = ""
-    ) async throws -> [[String: Any]] {
-
-        let urlStr = "\(baseURL)/rest/v1/\(table)\(query)"
-        if Constants.supabaseDryRun {
-            print("GET \(Constants.apiLogBaseURL)/\(table) (dry run)")
-            return []
-        }
-
-        guard let url = URL(string: urlStr)
-        else { throw URLError(.badURL) }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue(
-            "Bearer \(anonKey)",
-            forHTTPHeaderField: "Authorization")
-        request.setValue(
-            anonKey,
-            forHTTPHeaderField: "apikey")
-        request.setValue(
-            "application/json",
-            forHTTPHeaderField: "Content-Type")
-
-        let (data, _) = try await URLSession
-                                      .shared
-                                      .data(for: request)
-
-        guard let json = try? JSONSerialization
-                             .jsonObject(with: data)
-                             as? [[String: Any]]
-        else { return [] }
-
-        return json
-    }
-
-    // ── Insert into a table ───────────────────────────
-    func insert(
-            table: String,
-            payload: [String: Any]
-    ) async throws {
-
-        if Constants.supabaseDryRun {
-            switch table {
-            case "hazards":
-                Self.logDryRunHazard(payload)
-            case "sessions":
-                Self.logDryRunSession(payload)
-            default:
-                print("POST \(Constants.apiLogBaseURL)/\(table)")
-                print(Self.jsonBlock(payload))
-            }
-            return
-        }
-
-        guard let url = URL(
-            string: "\(baseURL)/rest/v1/\(table)")
-        else { throw URLError(.badURL) }
-
-        var request        = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(
-            "Bearer \(anonKey)",
-            forHTTPHeaderField: "Authorization")
-        request.setValue(
-            anonKey,
-            forHTTPHeaderField: "apikey")
-        request.setValue(
-            "application/json",
-            forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            "return=minimal",
-            forHTTPHeaderField: "Prefer")
-        request.httpBody = try? JSONSerialization.data(
-                                    withJSONObject: payload)
-
-        let (_, response) = try await URLSession
-                                          .shared
-                                          .data(for: request)
-
-        if let http = response as? HTTPURLResponse {
-            print("Insert \(table) status: \(http.statusCode)")
-        }
     }
 
     // ── Fetch hazards near a location ─────────────────
@@ -246,25 +144,40 @@ class SupabaseService {
             radiusMeters: Double = 50
     ) async throws -> [[String: Any]] {
 
-        // query hazards within bounding box
-        // simple approximation — 1 degree ≈ 111km
-        let delta  = radiusMeters / 111000.0
-        let minLat = lat - delta
-        let maxLat = lat + delta
-        let minLng = lng - delta
-        let maxLng = lng + delta
+        var components = URLComponents(string: "\(apiBaseURL)/hazards/nearby")
+        components?.queryItems = [
+            URLQueryItem(name: "lat", value: String(lat)),
+            URLQueryItem(name: "lng", value: String(lng)),
+            URLQueryItem(name: "radius", value: String(radiusMeters))
+        ]
 
-        let query = "?lat=gte.\(minLat)" +
-                    "&lat=lte.\(maxLat)" +
-                    "&lng=gte.\(minLng)" +
-                    "&lng=lte.\(maxLng)" +
-                    "&order=created_at.desc" +
-                    "&limit=20"
+        guard let url = components?.url else {
+            throw URLError(.badURL)
+        }
 
-        return try await select(
-            table: "hazards",
-            query: query
-        )
+        if Constants.apiDryRun {
+            print("GET \(url.absoluteString)")
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode)
+        else {
+            throw URLError(.badServerResponse)
+        }
+
+        guard let json = try? JSONSerialization
+            .jsonObject(with: data) as? [String: Any]
+        else { return [] }
+
+        let apiData = json["data"] as? [String: Any]
+        return apiData?["hazards"] as? [[String: Any]] ?? []
     }
 
     // ── Report a hazard ───────────────────────────────
@@ -275,109 +188,45 @@ class SupabaseService {
             lng: Double,
             userId: String = DeviceIdentity.userId
     ) async throws {
+        _ = userId
 
         let payload: [String: Any] = [
             "type":       type,
-            "label":      label,
             "lat":        lat,
             "lng":        lng,
-            "user_id":    userId,
-            "created_at": ISO8601DateFormatter()
-                              .string(from: Date())
+            "description": label,
         ]
 
-        try await insert(table: "hazards",
-                         payload: payload)
-        if !Constants.supabaseDryRun {
-            print("Hazard reported: \(type) at \(lat),\(lng)")
-        }
-    }
-
-    // ── Save walk session ─────────────────────────────
-    func saveSession(
-            userId: String,
-            startedAt: Date,
-            endedAt: Date,
-            distanceMeters: Double,
-            obstacleCount: Int,
-            path: [[Double]]
-    ) async throws {
-
-        let payload: [String: Any] = [
-            "user_id":        userId,
-            "started_at":     ISO8601DateFormatter()
-                                  .string(from: startedAt),
-            "ended_at":       ISO8601DateFormatter()
-                                  .string(from: endedAt),
-            "distance_m":     distanceMeters,
-            "obstacle_count": obstacleCount,
-            "path":           path
-        ]
-
-        try await insert(table: "sessions",
-                         payload: payload)
-        if !Constants.supabaseDryRun {
-            print("Session saved: \(distanceMeters)m")
-        }
-    }
-
-    // ── Fetch walk history ────────────────────────────
-    func fetchSessions(
-            userId: String,
-            limit: Int = 10
-    ) async throws -> [[String: Any]] {
-
-        let query = "?user_id=eq.\(userId)" +
-                    "&order=started_at.desc" +
-                    "&limit=\(limit)"
-
-        return try await select(
-            table: "sessions",
-            query: query
-        )
-    }
-
-    // ── Upload file to storage ────────────────────────
-    func uploadFile(
-            bucket: String,
-            name: String,
-            data: Data,
-            contentType: String
-    ) async throws -> String {
-
-        let urlStr = "\(baseURL)/storage/v1/object/\(bucket)/\(name)"
-        if Constants.supabaseDryRun {
-            return urlStr
+        if Constants.apiDryRun {
+            Self.logDryRunHazard(payload)
+            return
         }
 
-        guard let url = URL(string: urlStr)
+        guard let url = URL(string: "\(apiBaseURL)/hazards")
         else { throw URLError(.badURL) }
 
-        var request        = URLRequest(url: url)
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(
-            "Bearer \(anonKey)",
-            forHTTPHeaderField: "Authorization")
-        request.setValue(
-            contentType,
+            "application/json",
             forHTTPHeaderField: "Content-Type")
-        request.httpBody = data
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: payload)
 
-        let (_, response) = try await URLSession
-                                          .shared
-                                          .data(for: request)
-
-        if let http = response as? HTTPURLResponse {
-            print("Upload \(name) status: \(http.statusCode)")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode)
+        else {
+            throw URLError(.badServerResponse)
         }
 
-        return urlStr
+        print("Hazard reported: \(type) at \(lat),\(lng)")
     }
 
     // ── POST /api/navigate (Express-style) ────────────
     func postNavigate(_ payload: [String: Any]) async throws {
-        let urlStr = "\(Constants.apiLogBaseURL)/navigate"
-        if Constants.supabaseDryRun {
+        let urlStr = "\(apiBaseURL)/navigate"
+        if Constants.apiDryRun {
             print("POST \(urlStr)")
             print(Self.jsonBlock(payload))
             return
@@ -404,7 +253,7 @@ class SupabaseService {
 
     // ── Realtime subscription (polling) ───────────────
     // polls for new hazards every N seconds
-    // real Supabase realtime needs websocket library
+    // Uses polling for simplicity.
     func pollHazards(
             lat: Double,
             lng: Double,

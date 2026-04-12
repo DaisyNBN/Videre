@@ -130,7 +130,7 @@ enum ARMeshLandmarkSampler {
                     switch classification {
                     case .door:   return ("door", "ARKit door")
                     case .wall:   return ("wall", "ARKit wall")
-                    case .window: return ("window", "ARKit window")
+                    case .window: return ("unknown", "ARKit window")
                     default:      return nil
                     }
                 }()

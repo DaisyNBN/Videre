@@ -266,7 +266,7 @@ struct ContentView: View {
                                 ble: ble,
                                 lidar: lidar,
                                 appState: appState)
-                            try? await SupabaseService.shared
+                            try? await APIService.shared
                                 .postNavigate(p)
                         }
                     } label: {

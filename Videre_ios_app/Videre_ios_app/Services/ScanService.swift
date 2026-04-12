@@ -50,11 +50,6 @@ class ScanService: NSObject, ObservableObject {
     private var arkitLandmarkCentroids: [simd_float3] = []
     private let arkitLandmarkMinSpacing: Float = 1.0
 
-    /// Keyframe / depth uploads run in `Task`; wait for them before manifest.
-    private let pendingUploadLock = NSLock()
-    private var pendingMediaUploadCount = 0
-    private let pendingUploadWaitSeconds: TimeInterval = 90
-
     // ── Current camera position ───────────────────────
     // used for adding landmarks
     private(set) var currentPosition: simd_float3 = .zero
@@ -90,40 +85,12 @@ class ScanService: NSObject, ObservableObject {
         guard isScanning else { return }
         isScanning   = false
         isUploading  = true
-        uploadStatus = "Finishing media uploads..."
+        uploadStatus = "Uploading scan..."
 
         Task {
-            await waitForPendingMediaUploads()
-            await MainActor.run {
-                self.uploadStatus = "Uploading manifest..."
-            }
             let payload = buildPayload(endedAt: Date())
             await upload(payload: payload)
         }
-    }
-
-    private func registerPendingMediaUpload() {
-        pendingUploadLock.lock()
-        pendingMediaUploadCount += 1
-        pendingUploadLock.unlock()
-    }
-
-    private func unregisterPendingMediaUpload() {
-        pendingUploadLock.lock()
-        pendingMediaUploadCount -= 1
-        pendingUploadLock.unlock()
-    }
-
-    private func waitForPendingMediaUploads() async {
-        let deadline = Date().addingTimeInterval(pendingUploadWaitSeconds)
-        while Date() < deadline {
-            pendingUploadLock.lock()
-            let n = pendingMediaUploadCount
-            pendingUploadLock.unlock()
-            if n == 0 { return }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        print("ScanService: timeout waiting for pending media uploads")
     }
 
     // ── Called from LiDARService every AR frame ────────
@@ -162,8 +129,9 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Add user landmark at current position ──────────
     func addLandmark(type: String, label: String) {
+        let normalizedType = normalizedLandmarkType(type)
         let lm = Landmark(
-            type:      type,
+            type:      normalizedType,
             label:     label,
             x:         currentPosition.x,
             y:         currentPosition.y,
@@ -176,6 +144,25 @@ class ScanService: NSObject, ObservableObject {
             self.landmarkCount = self.landmarks.count
         }
         print("Landmark: \(label) at \(currentPosition)")
+    }
+
+    private func normalizedLandmarkType(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "door":
+            return "door"
+        case "wall":
+            return "wall"
+        case "stair", "stairs":
+            return "stair"
+        case "elevator":
+            return "elevator"
+        case "obstacle", "hazard":
+            return "obstacle"
+        case "exit":
+            return "exit"
+        default:
+            return "unknown"
+        }
     }
 
     /// Door / wall / window from scene mesh classification (throttled).
@@ -201,13 +188,14 @@ class ScanService: NSObject, ObservableObject {
             }
         }
         arkitLandmarkCentroids.append(position)
+        let normalizedType = normalizedLandmarkType(type)
         let lm = Landmark(
-            type:      type,
+            type:      normalizedType,
             label:     label,
             x:         position.x,
             y:         position.y,
             z:         position.z,
-            source:    "arkit",
+            source:    "user",
             timestamp: currentMs()
         )
         landmarks.append(lm)
@@ -244,37 +232,26 @@ class ScanService: NSObject, ObservableObject {
         )
         let ts    = currentMs()
         let intr  = frame.camera.intrinsics
-        let sid   = scanId
 
         let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
         let uiImg   = UIImage(ciImage: ciImage)
         guard let jpegData = uiImg.jpegData(compressionQuality: 0.5)
         else { return }
+        let imageBase64 = jpegData.base64EncodedString()
 
-        Task { [weak self] in
-            guard let self else { return }
-            self.registerPendingMediaUpload()
-            defer { self.unregisterPendingMediaUpload() }
-
-            let url = await self.uploadKeyframeJPEG(
-                jpegData,
-                name: "kf_\(sid)_\(ts).jpg"
-            )
-            guard !url.isEmpty else { return }
-
-            let kf = Keyframe(
-                imageUrl:   url,
-                timestamp:  ts,
-                cameraPose: pose,
-                fx:         intr.columns.0.x,
-                fy:         intr.columns.1.y,
-                cx:         intr.columns.2.x,
-                cy:         intr.columns.2.y
-            )
-            await MainActor.run {
-                self.keyframes.append(kf)
-                self.keyframeCount = self.keyframes.count
-            }
+        let kf = Keyframe(
+            imageBase64: imageBase64,
+            imageUrl:   nil,
+            timestamp:  ts,
+            cameraPose: pose,
+            fx:         intr.columns.0.x,
+            fy:         intr.columns.1.y,
+            cx:         intr.columns.2.x,
+            cy:         intr.columns.2.y
+        )
+        keyframes.append(kf)
+        DispatchQueue.main.async {
+            self.keyframeCount = self.keyframes.count
         }
     }
 
@@ -290,44 +267,24 @@ class ScanService: NSObject, ObservableObject {
             z: t.columns.3.z
         )
         let ts  = currentMs()
-        let sid = scanId
 
-        // Copy now — `ARFrame` buffers are not safe to use after delegate returns.
-        let depthBytes: Data = {
+        let hasDepthData: Bool = {
             CVPixelBufferLockBaseAddress(depthMap, .readOnly)
             defer {
                 CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
             }
             let height      = CVPixelBufferGetHeight(depthMap)
             let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
-            guard let base = CVPixelBufferGetBaseAddress(depthMap),
-                  height > 0,
-                  bytesPerRow > 0
-            else { return Data() }
-            return Data(bytes: base, count: bytesPerRow * height)
+            return height > 0 && bytesPerRow > 0
         }()
-        guard !depthBytes.isEmpty else { return }
+        guard hasDepthData else { return }
 
-        Task { [weak self] in
-            guard let self else { return }
-            self.registerPendingMediaUpload()
-            defer { self.unregisterPendingMediaUpload() }
-
-            let url = await self.uploadDepthData(
-                depthBytes,
-                name: "d_\(sid)_\(ts).bin"
-            )
-            guard !url.isEmpty else { return }
-
-            let ds = DepthSample(
-                timestamp:  ts,
-                cameraPose: pose,
-                depthUrl:   url
-            )
-            await MainActor.run {
-                self.depthSamples.append(ds)
-            }
-        }
+        let ds = DepthSample(
+            timestamp:  ts,
+            cameraPose: pose,
+            depthUrl:   "local-depth://\(scanId)/\(ts).bin"
+        )
+        depthSamples.append(ds)
     }
 
     // ── Build payload ─────────────────────────────────
@@ -360,7 +317,7 @@ class ScanService: NSObject, ObservableObject {
         )
     }
 
-    // ── Upload payload to Supabase ────────────────────
+    // ── Upload payload to backend API ─────────────────
     private func upload(payload: ScanPayload) async {
         guard let dict = payload.toDictionary()
         else {
@@ -372,7 +329,7 @@ class ScanService: NSObject, ObservableObject {
         }
 
         do {
-            let result = try await SupabaseService.shared
+            let result = try await APIService.shared
                 .callFunction(
                     name:    "ingest-scan",
                     payload: dict
@@ -380,7 +337,7 @@ class ScanService: NSObject, ObservableObject {
             await MainActor.run {
                 if let success = result["success"] as? Bool,
                    success {
-                    uploadStatus = Constants.supabaseDryRun
+                    uploadStatus = Constants.apiDryRun
                         ? "Dry run — manifest logged, not sent"
                         : "Upload complete"
                 } else {
@@ -397,91 +354,6 @@ class ScanService: NSObject, ObservableObject {
                 retryCount  += 1
             }
         }
-    }
-
-    // ── Upload keyframe JPEG to Supabase storage ──────
-    private func uploadKeyframeJPEG(_ data: Data,
-                                     name: String) async -> String {
-        guard !data.isEmpty else { return "" }
-
-        let urlStr = "\(Secrets.supabaseURL)" +
-                     "/storage/v1/object/keyframes/\(name)"
-        if Constants.supabaseDryRun {
-            return urlStr
-        }
-
-        guard let url = URL(string: urlStr) else { return "" }
-
-        var req        = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(Secrets.supabaseAnonKey)",
-                     forHTTPHeaderField: "Authorization")
-        req.setValue(Secrets.supabaseAnonKey,
-                     forHTTPHeaderField: "apikey")
-        req.setValue("image/jpeg",
-                     forHTTPHeaderField: "Content-Type")
-        req.httpBody = data
-
-        do {
-            let (_, response) = try await URLSession.shared
-                .data(for: req)
-            guard Self.storageResponseOK(response) else {
-                let code = (response as? HTTPURLResponse)?
-                    .statusCode ?? -1
-                print("Keyframe upload HTTP \(code)")
-                return ""
-            }
-            return urlStr
-        } catch {
-            print("Keyframe upload failed: \(error)")
-            return ""
-        }
-    }
-
-    // ── Upload depth binary to Supabase storage ────────
-    private func uploadDepthData(_ data: Data,
-                                  name: String) async -> String {
-        guard !data.isEmpty else { return "" }
-
-        let urlStr = "\(Secrets.supabaseURL)" +
-                     "/storage/v1/object/depth/\(name)"
-        if Constants.supabaseDryRun {
-            return urlStr
-        }
-
-        guard let url = URL(string: urlStr) else { return "" }
-
-        var req        = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(Secrets.supabaseAnonKey)",
-                     forHTTPHeaderField: "Authorization")
-        req.setValue(Secrets.supabaseAnonKey,
-                     forHTTPHeaderField: "apikey")
-        req.setValue("application/octet-stream",
-                     forHTTPHeaderField: "Content-Type")
-        req.httpBody = data
-
-        do {
-            let (_, response) = try await URLSession.shared
-                .data(for: req)
-            guard Self.storageResponseOK(response) else {
-                let code = (response as? HTTPURLResponse)?
-                    .statusCode ?? -1
-                print("Depth upload HTTP \(code)")
-                return ""
-            }
-            return urlStr
-        } catch {
-            print("Depth upload failed: \(error)")
-            return ""
-        }
-    }
-
-    private static func storageResponseOK(_ response: URLResponse?) -> Bool {
-        guard let http = response as? HTTPURLResponse else {
-            return false
-        }
-        return (200...299).contains(http.statusCode)
     }
 
     // ── Helpers ───────────────────────────────────────

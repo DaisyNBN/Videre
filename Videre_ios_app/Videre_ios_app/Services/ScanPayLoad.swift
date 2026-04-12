@@ -59,7 +59,8 @@ struct Landmark: Codable {
 }
 
 struct Keyframe: Codable {
-    var imageUrl:   String
+    var imageBase64: String
+    var imageUrl:   String?
     var timestamp:  Int64
     var cameraPose: CameraPose
     var fx:         Float?
