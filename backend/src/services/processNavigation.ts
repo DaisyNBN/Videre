@@ -3,6 +3,7 @@ import { NavRequest, NavResponse } from "../types";
 import { supabase } from "./supabase";
 import { haversineMeters } from "../utils/distance";
 import { getNearbyHazards } from "./processHazard";
+import { analyzeImageWithGeminiVision } from "./geminiVision";
 import logger from "./logger";
 
 export class NavigationError extends Error {
@@ -266,6 +267,17 @@ export type RerouteRequest = GenerateRouteRequest & {
 export type RerouteResult = GeneratedRoute & {
   rerouted: true;
   reason: string | null;
+};
+
+export type VisionLocalizationFrame = {
+  imageBase64: string;
+  yawDegrees?: number;
+  headingDegrees?: number;
+  capturedAtMs?: number;
+};
+
+export type VisionNavigationRequest = NavRequest & {
+  frames: VisionLocalizationFrame[];
 };
 
 type ResolvedRouteNodes = {
@@ -837,6 +849,44 @@ function scoreLabelMatch(
   return 0;
 }
 
+function dedupeVisionFrames(frames: VisionLocalizationFrame[]): VisionLocalizationFrame[] {
+  const seen = new Set<string>();
+  const deduped: VisionLocalizationFrame[] = [];
+
+  for (const frame of frames) {
+    const key = frame.imageBase64.trim();
+    if (!key || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(frame);
+  }
+
+  return deduped.slice(0, 2);
+}
+
+function buildVisionLandmarkCueFromMatches(matches: Array<{
+  label: string;
+  distance: number;
+  relativeDelta?: number;
+}>): string | undefined {
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  const phrases = matches.slice(0, 2).map((match) => {
+    const direction =
+      typeof match.relativeDelta === "number"
+        ? `on your ${relativeDirectionFromDelta(match.relativeDelta)}`
+        : "nearby";
+
+    return `${match.label} ${direction}`;
+  });
+
+  return `Visual check: ${phrases.join(" and ")}.`;
+}
+
 function resolveNearestNodeFromPoint(
   nodesById: Map<string, RouteNodeRow>,
   point: { x: number; y: number; z?: number },
@@ -1271,6 +1321,156 @@ export async function rerouteNavigation(
     rerouted: true,
     reason: request.reason ?? null,
   };
+}
+
+export async function getVisionNavigationInstruction(
+  request: VisionNavigationRequest,
+): Promise<NavResponse> {
+  if (!request.map_id || !request.map_position) {
+    throw new NavigationError(400, "map_id and map_position are required for vision localization");
+  }
+
+  const frames = dedupeVisionFrames(request.frames);
+  if (frames.length === 0) {
+    throw new NavigationError(400, "At least one non-empty vision frame is required");
+  }
+
+  const movementSpeedMps = resolveMovementSpeedMps(request);
+  const adaptiveThresholds = resolveAdaptiveTurnThresholds(movementSpeedMps);
+  const checkpointContext = request.route_id
+    ? await getCheckpointContext(
+      request.route_id,
+      request.location,
+      request.map_position,
+      request.heading_degrees,
+      adaptiveThresholds.checkpointAdvanceDistanceM,
+    )
+    : undefined;
+
+  const analyses = await Promise.all(
+    frames.map((frame) => analyzeImageWithGeminiVision(frame.imageBase64)),
+  );
+
+  const observed = analyses.flatMap((analysis, index) => {
+    const frame = frames[index];
+    const frameHeading = normalizeHeadingDegrees(frame.headingDegrees)
+      ?? normalizeHeadingDegrees(frame.yawDegrees)
+      ?? normalizeHeadingDegrees(request.heading_degrees);
+
+    return analysis.landmarks.map((landmark) => ({
+      label: landmark.label,
+      type: landmark.type,
+      confidence: landmark.confidence,
+      frameHeading,
+    }));
+  });
+
+  const { data, error } = await supabase
+    .from("landmarks")
+    .select("label, type, status, confidence, x, y, z, heading_degrees")
+    .eq("room_map_id", request.map_id)
+    .limit(96);
+
+  if (error && !isUndefinedTableOrColumn(error)) {
+    logger.warn("Unable to fetch map landmarks for vision localization: %o", error);
+  }
+
+  const mapPosition = request.map_position;
+  const nearbyLandmarks = ((data ?? []) as NearbyLandmarkRow[])
+    .filter((landmark) => landmark.status !== "rejected")
+    .map((landmark) => {
+      const dx = landmark.x - mapPosition.x;
+      const dy = landmark.y - mapPosition.y;
+      const dz = typeof mapPosition.z === "number" ? landmark.z - mapPosition.z : 0;
+      const distance = Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
+      return { landmark, distance };
+    })
+    .filter((entry) => entry.distance <= 6);
+
+  const rankedMatches = observed.flatMap((observation) => {
+    const normalizedObservedLabel = normalizeText(observation.label ?? observation.type ?? "");
+
+    return nearbyLandmarks.flatMap((candidate) => {
+      const candidateLabel = normalizeText(candidate.landmark.label ?? "");
+      const typeMatches = normalizeText(candidate.landmark.type) === normalizeText(observation.type);
+      const labelScore = candidateLabel
+        ? scoreLabelMatch(candidateLabel, normalizedObservedLabel)
+        : 0;
+      const roughMatch = candidateLabel
+        ? labelsRoughlyMatch(candidateLabel, normalizedObservedLabel)
+        : false;
+
+      if (!typeMatches && !roughMatch && labelScore === 0) {
+        return [];
+      }
+
+      let score = labelScore;
+      if (typeMatches) {
+        score += 18;
+      }
+      score += Math.max(0, 8 - candidate.distance);
+      score += Math.max(0, Math.min(observation.confidence ?? 0, 1)) * 10;
+      if (candidate.landmark.status === "verified") {
+        score += 6;
+      }
+      if (typeof candidate.landmark.confidence === "number") {
+        score += Math.max(0, Math.min(candidate.landmark.confidence, 1)) * 5;
+      }
+
+      const bearing = bearingDegreesFromMapVector(
+        mapPosition.x,
+        mapPosition.y,
+        candidate.landmark.x,
+        candidate.landmark.y,
+      );
+      const relativeDelta =
+        typeof bearing === "number" && typeof observation.frameHeading === "number"
+          ? clampHeadingDelta(bearing - observation.frameHeading)
+          : typeof bearing === "number" && typeof request.heading_degrees === "number"
+            ? clampHeadingDelta(bearing - request.heading_degrees)
+            : undefined;
+
+      return [{
+        label: candidate.landmark.label ?? candidate.landmark.type,
+        distance: candidate.distance,
+        relativeDelta,
+        score,
+      }];
+    });
+  });
+
+  const bestMatches = rankedMatches
+    .sort((lhs, rhs) => rhs.score - lhs.score)
+    .filter((match, index, all) => {
+      return all.findIndex((candidate) => candidate.label === match.label) === index;
+    })
+    .slice(0, 2);
+
+  const nearbyLandmarkCue = buildVisionLandmarkCueFromMatches(bestMatches)
+    ?? await resolveNearbyLandmarkCue(
+      request.map_id,
+      request.map_position,
+      request.heading_degrees,
+    );
+
+  const response = buildDeterministicRouteResponse(
+    request,
+    checkpointContext,
+    nearbyLandmarkCue,
+  );
+
+  if (bestMatches.length === 0) {
+    response.fallback_used = true;
+    response.urgency = response.urgency === "high" ? "high" : "medium";
+    if (response.haptic_pattern === "none" || response.haptic_pattern === "single_tap") {
+      response.haptic_pattern = "double_tap";
+    }
+    response.instruction = checkpointContext
+      ? `Visual check inconclusive. ${response.instruction}`
+      : "Visual check inconclusive. Slow down and point toward a doorway or sign.";
+  }
+
+  return response;
 }
 
 export async function getNavigationInstruction(

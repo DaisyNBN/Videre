@@ -7,12 +7,14 @@ const {
     mockGenerateNavigationRouteFromCoordinates,
     mockGenerateNavigationRouteToRoom,
     mockGetNavigationInstruction,
+    mockGetVisionNavigationInstruction,
     mockRerouteNavigation,
 } = vi.hoisted(() => ({
     mockGenerateNavigationRoute: vi.fn(),
     mockGenerateNavigationRouteFromCoordinates: vi.fn(),
     mockGenerateNavigationRouteToRoom: vi.fn(),
     mockGetNavigationInstruction: vi.fn(),
+    mockGetVisionNavigationInstruction: vi.fn(),
     mockRerouteNavigation: vi.fn(),
 }));
 
@@ -29,6 +31,7 @@ vi.mock("../../src/services/processNavigation", () => ({
     generateNavigationRouteFromCoordinates: mockGenerateNavigationRouteFromCoordinates,
     generateNavigationRouteToRoom: mockGenerateNavigationRouteToRoom,
     getNavigationInstruction: mockGetNavigationInstruction,
+    getVisionNavigationInstruction: mockGetVisionNavigationInstruction,
     rerouteNavigation: mockRerouteNavigation,
 }));
 
@@ -55,7 +58,54 @@ describe("navigation routes", () => {
         mockGenerateNavigationRouteFromCoordinates.mockReset();
         mockGenerateNavigationRouteToRoom.mockReset();
         mockGetNavigationInstruction.mockReset();
+        mockGetVisionNavigationInstruction.mockReset();
         mockRerouteNavigation.mockReset();
+    });
+
+    it("returns guidance for vision localization payload", async () => {
+        mockGetVisionNavigationInstruction.mockResolvedValue({
+            instruction: "Visual check: main door ahead-left. Slight right.",
+            urgency: "medium",
+            haptic_pattern: "double_tap",
+            next_checkpoint: "Room 201",
+            distance_to_next_m: 3,
+            fallback_used: false,
+        });
+
+        const app = createApp();
+
+        const response = await request(app)
+            .post("/api/navigation/vision-localize")
+            .send({
+                routeId: "route-123",
+                mapId: "map-1",
+                location: { lat: 12.1, lng: 34.2 },
+                mapPosition: { x: 1.2, y: 0.4, z: 0.0 },
+                headingDegrees: 90,
+                obstacles: [],
+                speed: "walking",
+                frames: [
+                    {
+                        imageBase64: "data:image/jpeg;base64,ZmFrZQ==",
+                        yawDegrees: 15,
+                    },
+                ],
+            });
+
+        expect(response.status).toBe(200);
+        expect(response.body.success).toBe(true);
+        expect(mockGetVisionNavigationInstruction).toHaveBeenCalledWith(
+            expect.objectContaining({
+                route_id: "route-123",
+                map_id: "map-1",
+                map_position: { x: 1.2, y: 0.4, z: 0.0 },
+                frames: [
+                    expect.objectContaining({
+                        imageBase64: "data:image/jpeg;base64,ZmFrZQ==",
+                    }),
+                ],
+            }),
+        );
     });
 
     it("returns instruction for valid instructions payload", async () => {

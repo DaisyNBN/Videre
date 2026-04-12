@@ -52,6 +52,8 @@ struct ContentView: View {
     @State private var localizationWarningActive: Bool = false
     @State private var localizationGraceUntil: Date = .distantPast
     @State private var lastLocalizationWarningSpokenAt: Date = .distantPast
+    @State private var isVisionLocalizationInFlight: Bool = false
+    @State private var lastVisionLocalizationAttemptAt: Date = .distantPast
     private let autoGuidanceTimer = Timer.publish(every: 1.2, on: .main, in: .common).autoconnect()
     private let guidanceThrottleInterval: TimeInterval = 0.9
     private let recentDestinationsStorageKey = "videre.recentDestinations"
@@ -63,6 +65,8 @@ struct ContentView: View {
     private let localizationWarningSpeechCooldown: TimeInterval = 8.0
     private let localizationStartupGraceWindow: TimeInterval = 6.0
     private let localizationHardHoldDistanceDuringGrace: Double = 5.0
+    private let visionLocalizationCooldown: TimeInterval = 8.0
+    private let visionLocalizationMaxDistanceThreshold: Double = 5.5
 
     init(openScan: @escaping () -> Void = {}) {
         self.openScan = openScan
@@ -1157,6 +1161,18 @@ struct ContentView: View {
             )
 
             if shouldHoldGuidanceForLocalization(localizationStatus) {
+                let handledByVision = await attemptVisionLocalizationIfPossible(
+                    payload: payload,
+                    localizationStatus: localizationStatus
+                )
+
+                if handledByVision {
+                    await MainActor.run {
+                        isGuidanceRequestInFlight = false
+                    }
+                    return
+                }
+
                 await MainActor.run {
                     applyLocalizationWarning(localizationStatus)
                     isGuidanceRequestInFlight = false
@@ -1225,6 +1241,101 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func shouldAttemptVisionLocalization(_ status: RouteLocalizationStatus) -> Bool {
+        guard status.active,
+              let distance = status.nearestNodeDistanceM,
+              distance <= visionLocalizationMaxDistanceThreshold,
+              APIService.shared.activeRouteId != nil,
+              !(APIService.shared.activeMapId ?? scan.backendMapId).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !isVisionLocalizationInFlight
+        else {
+            return false
+        }
+
+        return Date().timeIntervalSince(lastVisionLocalizationAttemptAt) >= visionLocalizationCooldown
+    }
+
+    private func attemptVisionLocalizationIfPossible(
+            payload: [String: Any],
+            localizationStatus: RouteLocalizationStatus
+    ) async -> Bool {
+        guard shouldAttemptVisionLocalization(localizationStatus) else {
+            return false
+        }
+
+        let frames = lidar.localizationFrames(maxCount: 2, minYawSeparationDegrees: 55, maxAgeSeconds: 10)
+        guard !frames.isEmpty else {
+            return false
+        }
+
+        await MainActor.run {
+            isVisionLocalizationInFlight = true
+            lastVisionLocalizationAttemptAt = Date()
+            localizationStatusMessage = "Checking nearby landmarks with camera..."
+            lastNavigationMeta = "Vision re-localization using \(frames.count) photo scan(s)"
+        }
+
+        var visionPayload = payload
+        visionPayload["frames"] = frames
+
+        do {
+            let response = try await APIService.shared.postVisionLocalization(visionPayload)
+
+            await MainActor.run {
+                if !response.fallbackUsed,
+                   let nearestNodeId = localizationStatus.nearestNodeId {
+                    APIService.shared.reanchorLocalPositionToRouteNode(
+                        nodeId: nearestNodeId,
+                        localX: Double(scan.currentPosition.x),
+                        localY: Double(scan.currentPosition.y),
+                        localZ: Double(scan.currentPosition.z),
+                        blend: 0.9
+                    )
+                }
+
+                lastNavigationInstruction = response.instruction
+                let fallbackText = response.fallbackUsed ? "yes" : "no"
+                let distanceText: String = {
+                    guard let distance = response.distanceToNextM else {
+                        return "n/a"
+                    }
+                    return String(format: "%.1f m", distance)
+                }()
+
+                lastNavigationMeta =
+                    "Vision localization: urgency \(response.urgency), " +
+                    "haptic \(response.hapticPattern), " +
+                    "next \(response.nextCheckpoint ?? "none"), " +
+                    "distance \(distanceText), fallback \(fallbackText)"
+                localizationWarningActive = response.fallbackUsed
+                localizationStatusMessage = response.fallbackUsed
+                    ? "Visual check inconclusive"
+                    : "Visual landmarks confirmed nearby and route re-anchored"
+                isVisionLocalizationInFlight = false
+
+                applyHapticPattern(
+                    response.hapticPattern,
+                    urgency: response.urgency
+                )
+
+                let priority: VoiceService.Priority =
+                    response.urgency == "high" ? .high : .normal
+                VoiceService.shared.speak(response.instruction, priority: priority)
+                lastSpokenGuidanceInstruction = response.instruction
+                lastSpokenGuidanceAt = Date()
+            }
+
+            return true
+        } catch {
+            await MainActor.run {
+                isVisionLocalizationInFlight = false
+                localizationStatusMessage = "Vision check unavailable: \(error.localizedDescription)"
+            }
+
+            return false
         }
     }
 

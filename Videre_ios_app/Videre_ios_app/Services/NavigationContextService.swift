@@ -89,10 +89,15 @@ final class NavigationContextService: NSObject, ObservableObject {
             lidar: lidar
         )
         obstacles.append(contentsOf: cachedHazardObstacles)
+        let correctedMapPosition = APIService.shared.correctedMapPosition(
+            localX: Double(scan.currentPosition.x),
+            localY: Double(scan.currentPosition.y),
+            localZ: Double(scan.currentPosition.z)
+        )
         let mapPosition: [String: Any] = [
-            "x": Double(scan.currentPosition.x),
-            "y": Double(scan.currentPosition.y),
-            "z": Double(scan.currentPosition.z),
+            "x": correctedMapPosition.x,
+            "y": correctedMapPosition.y,
+            "z": correctedMapPosition.z,
         ]
 
         return [

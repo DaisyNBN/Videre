@@ -126,6 +126,13 @@ final class APIService {
         var metersPerUnit: Double
     }
 
+    private struct LocalRoutePositionOffset {
+        let mapId: String
+        var dx: Double
+        var dy: Double
+        var dz: Double
+    }
+
     private struct ProjectedRouteNode {
         let id: String
         let index: Int
@@ -166,6 +173,7 @@ final class APIService {
     private var cachedMapNodesById: [String: (x: Double, y: Double, z: Double)] = [:]
     private var cachedRouteNodeIds: [String] = []
     private var routeGeoCalibration: RouteGeoCalibration?
+    private var localRoutePositionOffset: LocalRoutePositionOffset?
     private var lastGeoCalibrationSample: (lat: Double, lng: Double)?
     private var mapGeoAnchorsByMapId: [String: MapGeoAnchor] = [:]
 
@@ -218,6 +226,7 @@ final class APIService {
         if routeGeoCalibration?.mapId != mapId ||
             routeGeoCalibration?.startNodeId != startNodeId {
             routeGeoCalibration = nil
+            localRoutePositionOffset = nil
             lastGeoCalibrationSample = nil
         }
     }
@@ -230,7 +239,56 @@ final class APIService {
         cachedMapNodesById = [:]
         cachedRouteNodeIds = []
         routeGeoCalibration = nil
+        localRoutePositionOffset = nil
         lastGeoCalibrationSample = nil
+    }
+
+    func correctedMapPosition(
+            localX: Double,
+            localY: Double,
+            localZ: Double
+    ) -> (x: Double, y: Double, z: Double) {
+        guard let offset = localRoutePositionOffset,
+              offset.mapId == activeMapId else {
+            return (localX, localY, localZ)
+        }
+
+        return (
+            x: localX + offset.dx,
+            y: localY + offset.dy,
+            z: localZ + offset.dz
+        )
+    }
+
+    func reanchorLocalPositionToRouteNode(
+            nodeId: String,
+            localX: Double,
+            localY: Double,
+            localZ: Double,
+            blend: Double = 0.85
+    ) {
+        guard let mapId = activeMapId,
+              let node = cachedMapNodesById[nodeId]
+        else {
+            return
+        }
+
+        let corrected = correctedMapPosition(localX: localX, localY: localY, localZ: localZ)
+        let safeBlend = clamp(blend, min: 0, max: 1)
+        let deltaX = node.x - corrected.x
+        let deltaY = node.y - corrected.y
+        let deltaZ = node.z - corrected.z
+
+        let existing = localRoutePositionOffset?.mapId == mapId
+            ? localRoutePositionOffset
+            : LocalRoutePositionOffset(mapId: mapId, dx: 0, dy: 0, dz: 0)
+
+        localRoutePositionOffset = LocalRoutePositionOffset(
+            mapId: mapId,
+            dx: existing!.dx + (deltaX * safeBlend),
+            dy: existing!.dy + (deltaY * safeBlend),
+            dz: existing!.dz + (deltaZ * safeBlend)
+        )
     }
 
     func cacheMapNodes(nodes: [[String: Any]]) {
@@ -605,13 +663,15 @@ final class APIService {
             )
         }
 
+        let corrected = correctedMapPosition(localX: localX, localY: localY, localZ: localZ)
+
         var nearestNodeId: String?
         var nearestDistance = Double.greatestFiniteMagnitude
 
         for node in routeNodes {
-            let dx = node.x - localX
-            let dy = node.y - localY
-            let dz = node.z - localZ
+            let dx = node.x - corrected.x
+            let dy = node.y - corrected.y
+            let dz = node.z - corrected.z
             let distance = sqrt((dx * dx) + (dy * dy) + (dz * dz))
 
             if distance < nearestDistance {
@@ -1916,6 +1976,34 @@ final class APIService {
             instruction: data["instruction"] as? String ?? "Continue straight.",
             urgency: data["urgency"] as? String ?? "low",
             hapticPattern: data["haptic_pattern"] as? String ?? "single_tap",
+            nextCheckpoint: data["next_checkpoint"] as? String,
+            distanceToNextM: numberAsDouble(data["distance_to_next_m"]),
+            fallbackUsed: data["fallback_used"] as? Bool ?? false
+        )
+    }
+
+    func postVisionLocalization(_ payload: [String: Any]) async throws -> NavigationInstructionResponse {
+        let urlStr = "\(apiBaseURL)/navigate/vision-localize"
+        if Constants.apiDryRun {
+            print("POST \(urlStr)")
+            print(Self.jsonBlock(payload))
+            return NavigationInstructionResponse(
+                instruction: "Visual check: doorway ahead-left. Continue slightly right.",
+                urgency: "medium",
+                hapticPattern: "double_tap",
+                nextCheckpoint: nil,
+                distanceToNextM: nil,
+                fallbackUsed: false
+            )
+        }
+
+        let response = try await requestJSON(path: "/navigate/vision-localize", method: "POST", payload: payload)
+        let data = try extractApiData(response)
+
+        return NavigationInstructionResponse(
+            instruction: data["instruction"] as? String ?? "Visual check inconclusive.",
+            urgency: data["urgency"] as? String ?? "medium",
+            hapticPattern: data["haptic_pattern"] as? String ?? "double_tap",
             nextCheckpoint: data["next_checkpoint"] as? String,
             distanceToNextM: numberAsDouble(data["distance_to_next_m"]),
             fallbackUsed: data["fallback_used"] as? Bool ?? false

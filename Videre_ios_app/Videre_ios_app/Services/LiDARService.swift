@@ -1,6 +1,22 @@
 import ARKit
 import RealityKit
 import Combine
+import CoreImage
+import UIKit
+
+struct VisionLocalizationFramePayload {
+    let imageBase64: String
+    let yawDegrees: Double
+    let capturedAtMs: Int64
+
+    func toDictionary() -> [String: Any] {
+        [
+            "imageBase64": imageBase64,
+            "yawDegrees": yawDegrees,
+            "capturedAtMs": capturedAtMs,
+        ]
+    }
+}
 
 struct DepthAnalysis {
     var leftCm:   Int = 999
@@ -52,6 +68,10 @@ class LiDARService: NSObject, ObservableObject {
 
     private var lastObstacleLabelSampleTime: TimeInterval = 0
     private let obstacleLabelSampleInterval: TimeInterval = 0.35
+    private var lastVisionSnapshotTime: TimeInterval = 0
+    private let visionSnapshotInterval: TimeInterval = 0.9
+    private let maxVisionSnapshots = 6
+    private var recentVisionSnapshots: [VisionLocalizationFramePayload] = []
 
     override init() {
         super.init()
@@ -94,6 +114,8 @@ class LiDARService: NSObject, ObservableObject {
         session?.run(config,
                      options: [.resetTracking,
                                 .removeExistingAnchors])
+        recentVisionSnapshots.removeAll()
+        lastVisionSnapshotTime = 0
         isRunning             = true
         appState?.lidarEnabled = true
         print("LiDAR started")
@@ -107,6 +129,8 @@ class LiDARService: NSObject, ObservableObject {
         nearestCm              = 999
         depthClearSide         = "center"
         navigationObstacleLabel = "obstacle"
+        recentVisionSnapshots.removeAll()
+        lastVisionSnapshotTime = 0
         appState?.lidarEnabled = false
         appState?.lidarDistance = 0
         print("LiDAR stopped")
@@ -115,6 +139,122 @@ class LiDARService: NSObject, ObservableObject {
     // ── Toggle ────────────────────────────────────────
     func toggle() {
         isRunning ? stop() : start()
+    }
+
+    func localizationFrames(
+            maxCount: Int = 2,
+            minYawSeparationDegrees: Double = 55,
+            maxAgeSeconds: TimeInterval = 10
+    ) -> [[String: Any]] {
+        let cutoffMs = Int64((Date().timeIntervalSince1970 - maxAgeSeconds) * 1000)
+        let recent = recentVisionSnapshots
+            .filter { $0.capturedAtMs >= cutoffMs }
+            .sorted { $0.capturedAtMs > $1.capturedAtMs }
+
+        guard !recent.isEmpty else {
+            return []
+        }
+
+        var selected: [VisionLocalizationFramePayload] = []
+        for snapshot in recent {
+            if selected.isEmpty {
+                selected.append(snapshot)
+            } else if selected.count < maxCount {
+                let hasEnoughYawSeparation = selected.allSatisfy { existing in
+                    Self.angularDifferenceDegrees(existing.yawDegrees, snapshot.yawDegrees) >= minYawSeparationDegrees
+                }
+
+                if hasEnoughYawSeparation {
+                    selected.append(snapshot)
+                }
+            }
+
+            if selected.count >= maxCount {
+                break
+            }
+        }
+
+        if selected.count == 1,
+           maxCount > 1,
+           let fallback = recent.dropFirst().max(by: {
+                Self.angularDifferenceDegrees($0.yawDegrees, selected[0].yawDegrees) <
+                    Self.angularDifferenceDegrees($1.yawDegrees, selected[0].yawDegrees)
+           }),
+           Self.angularDifferenceDegrees(fallback.yawDegrees, selected[0].yawDegrees) >= 30 {
+            selected.append(fallback)
+        }
+
+        return selected.prefix(maxCount).map { $0.toDictionary() }
+    }
+
+    private static func angularDifferenceDegrees(_ lhs: Double, _ rhs: Double) -> Double {
+        var delta = abs(lhs - rhs).truncatingRemainder(dividingBy: 360)
+        if delta > 180 {
+            delta = 360 - delta
+        }
+        return delta
+    }
+
+    private func maybeCaptureVisionSnapshot(frame: ARFrame, nowMono: TimeInterval) {
+        guard nowMono - lastVisionSnapshotTime >= visionSnapshotInterval else {
+            return
+        }
+
+        if appState?.walkState != .walking {
+            return
+        }
+
+        lastVisionSnapshotTime = nowMono
+
+        let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            return
+        }
+
+        let image = UIImage(cgImage: cgImage)
+        let resized = resizeForVision(image: image, maxDimension: 960)
+        guard let jpegData = resized.jpegData(compressionQuality: 0.35) else {
+            return
+        }
+
+        let yawDegrees = cameraYawDegrees(frame.camera.transform)
+        let payload = VisionLocalizationFramePayload(
+            imageBase64: jpegData.base64EncodedString(),
+            yawDegrees: yawDegrees,
+            capturedAtMs: Int64(Date().timeIntervalSince1970 * 1000)
+        )
+
+        recentVisionSnapshots.append(payload)
+        if recentVisionSnapshots.count > maxVisionSnapshots {
+            recentVisionSnapshots.removeFirst(recentVisionSnapshots.count - maxVisionSnapshots)
+        }
+    }
+
+    private func resizeForVision(image: UIImage, maxDimension: CGFloat) -> UIImage {
+        let size = image.size
+        let largest = max(size.width, size.height)
+        guard largest > maxDimension, largest > 0 else {
+            return image
+        }
+
+        let scale = maxDimension / largest
+        let targetSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+    }
+
+    private func cameraYawDegrees(_ transform: simd_float4x4) -> Double {
+        let forward = simd_double3(
+            Double(-transform.columns.2.x),
+            Double(-transform.columns.2.y),
+            Double(-transform.columns.2.z)
+        )
+        let radians = atan2(forward.x, forward.z)
+        let degrees = radians * 180 / .pi
+        return degrees >= 0 ? degrees : degrees + 360
     }
 }
 
@@ -125,6 +265,7 @@ extension LiDARService: ARSessionDelegate {
                  didUpdate frame: ARFrame) {
 
         let nowMono = ProcessInfo.processInfo.systemUptime
+        maybeCaptureVisionSnapshot(frame: frame, nowMono: nowMono)
         if nowMono - lastObstacleLabelSampleTime
                 >= obstacleLabelSampleInterval {
             lastObstacleLabelSampleTime = nowMono

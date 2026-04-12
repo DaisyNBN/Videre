@@ -7,6 +7,7 @@ import {
   generateNavigationRouteFromCoordinates,
   generateNavigationRouteToRoom,
   getNavigationInstruction,
+  getVisionNavigationInstruction,
   NavigationError,
   rerouteNavigation,
 } from "../src/services/processNavigation";
@@ -19,9 +20,11 @@ import {
   navigationRouteBodySchema,
   navigationRouteFromCoordinatesBodySchema,
   navigationRouteToRoomBodySchema,
+  navigationVisionLocalizationBodySchema,
   NavigationRouteBody,
   NavigationRouteFromCoordinatesBody,
   NavigationRouteToRoomBody,
+  NavigationVisionLocalizationBody,
 } from "../src/schemas/navigation";
 
 const router = Router();
@@ -71,6 +74,37 @@ router.post(
   "/instructions",
   validateBody(navigationInstructionBodySchema),
   handleInstructionRequest,
+);
+
+router.post(
+  "/vision-localize",
+  validateBody(navigationVisionLocalizationBodySchema),
+  async (req: Request, res: Response) => {
+    const body = req.body as NavigationVisionLocalizationBody;
+
+    try {
+      const response = await getVisionNavigationInstruction({
+        route_id: body.route_id ?? body.routeId ?? "",
+        map_id: body.map_id ?? body.mapId,
+        location: body.location,
+        map_position: body.map_position ?? body.mapPosition,
+        heading_degrees: body.heading_degrees ?? body.headingDegrees ?? 0,
+        obstacles: body.obstacles,
+        speed: body.speed,
+        speed_mps: body.speed_mps ?? body.speedMps,
+        frames: body.frames,
+      });
+
+      return res.json(new ApiResponse(true, "Vision localization guidance generated", response));
+    } catch (err) {
+      if (err instanceof NavigationError) {
+        return res.status(err.statusCode).json(new ApiResponse(false, err.message));
+      }
+
+      logger.error("Vision localization navigation error: %o", err);
+      return res.status(500).json(new ApiResponse(false, "Failed to generate vision localization guidance"));
+    }
+  },
 );
 
 router.post(
