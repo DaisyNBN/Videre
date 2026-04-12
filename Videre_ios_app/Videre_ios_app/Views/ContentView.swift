@@ -765,67 +765,67 @@ struct ContentView: View {
 
         Task {
             do {
-                var mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
+                let roomSuggestions = try await APIService.shared.fetchRoomSuggestions(limit: 20)
+                var labels: [String] = roomSuggestions
+
+                let mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                if mapId.isEmpty {
+                if !mapId.isEmpty {
                     do {
-                        mapId = try await resolveActiveMapIdForNavigation(preferredRoomName: nil)
+                        let landmarks = try await APIService.shared.fetchMapLandmarks(mapId: mapId)
+                        let sorted = landmarks.sorted { lhs, rhs in
+                            let lhsScore = destinationSuggestionScore(lhs)
+                            let rhsScore = destinationSuggestionScore(rhs)
+                            if lhsScore == rhsScore {
+                                return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+                            }
+                            return lhsScore > rhsScore
+                        }
+
+                        var seen = Set<String>()
+                        var landmarkLabels: [String] = []
+                        for landmark in sorted {
+                            let label = landmark.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let normalized = label.lowercased()
+
+                            guard !label.isEmpty,
+                                  normalized != "(unlabeled)",
+                                  landmark.status.lowercased() != "rejected",
+                                  !seen.contains(normalized)
+                            else {
+                                continue
+                            }
+
+                            seen.insert(normalized)
+                            landmarkLabels.append(label)
+                        }
+
+                        if !landmarkLabels.isEmpty {
+                            labels = landmarkLabels + roomSuggestions
+                        }
                     } catch {
-                        let roomSuggestions = try await APIService.shared.fetchRoomSuggestions(limit: 20)
-                        await MainActor.run {
-                            destinationSuggestions = Array(roomSuggestions.prefix(12))
-                            destinationSuggestionsStatus = destinationSuggestions.isEmpty
-                                ? "No existing rooms available yet"
-                                : "Loaded \(destinationSuggestions.count) room suggestions"
-                            isDestinationSuggestionsLoading = false
-                        }
-                        return
+                        // Keep room-based suggestions when active-map landmark enrichment fails.
                     }
                 }
 
-                var labels: [String] = []
-
-                do {
-                    let landmarks = try await APIService.shared.fetchMapLandmarks(mapId: mapId)
-                    let sorted = landmarks.sorted { lhs, rhs in
-                        let lhsScore = destinationSuggestionScore(lhs)
-                        let rhsScore = destinationSuggestionScore(rhs)
-                        if lhsScore == rhsScore {
-                            return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
-                        }
-                        return lhsScore > rhsScore
+                var deduped: [String] = []
+                var dedupSeen = Set<String>()
+                for label in labels {
+                    let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let key = trimmed.lowercased()
+                    guard !trimmed.isEmpty, !dedupSeen.contains(key) else {
+                        continue
                     }
 
-                    var seen = Set<String>()
-                    for landmark in sorted {
-                        let label = landmark.label.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let normalized = label.lowercased()
-
-                        guard !label.isEmpty,
-                              normalized != "(unlabeled)",
-                              landmark.status.lowercased() != "rejected",
-                              !seen.contains(normalized)
-                        else {
-                            continue
-                        }
-
-                        seen.insert(normalized)
-                        labels.append(label)
-                    }
-                } catch {
-                    // If map landmarks fail to load, still provide room suggestions from existing data.
-                }
-
-                if labels.isEmpty {
-                    let roomSuggestions = try await APIService.shared.fetchRoomSuggestions(limit: 20)
-                    labels.append(contentsOf: roomSuggestions)
+                    dedupSeen.insert(key)
+                    deduped.append(trimmed)
                 }
 
                 await MainActor.run {
-                    destinationSuggestions = Array(labels.prefix(12))
+                    destinationSuggestions = Array(deduped.prefix(12))
                     if destinationSuggestions.isEmpty {
-                        destinationSuggestionsStatus = "No existing rooms or landmark labels available"
+                        destinationSuggestionsStatus = "No existing map room suggestions available"
                     } else {
                         destinationSuggestionsStatus = "Loaded \(destinationSuggestions.count) destination suggestions"
                     }
