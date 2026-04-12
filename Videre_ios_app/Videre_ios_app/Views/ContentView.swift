@@ -784,33 +784,37 @@ struct ContentView: View {
                     }
                 }
 
-                let landmarks = try await APIService.shared.fetchMapLandmarks(mapId: mapId)
-                let sorted = landmarks.sorted { lhs, rhs in
-                    let lhsScore = destinationSuggestionScore(lhs)
-                    let rhsScore = destinationSuggestionScore(rhs)
-                    if lhsScore == rhsScore {
-                        return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
-                    }
-                    return lhsScore > rhsScore
-                }
-
-                var seen = Set<String>()
                 var labels: [String] = []
 
-                for landmark in sorted {
-                    let label = landmark.label.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let normalized = label.lowercased()
-
-                    guard !label.isEmpty,
-                          normalized != "(unlabeled)",
-                          landmark.status.lowercased() != "rejected",
-                          !seen.contains(normalized)
-                    else {
-                        continue
+                do {
+                    let landmarks = try await APIService.shared.fetchMapLandmarks(mapId: mapId)
+                    let sorted = landmarks.sorted { lhs, rhs in
+                        let lhsScore = destinationSuggestionScore(lhs)
+                        let rhsScore = destinationSuggestionScore(rhs)
+                        if lhsScore == rhsScore {
+                            return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+                        }
+                        return lhsScore > rhsScore
                     }
 
-                    seen.insert(normalized)
-                    labels.append(label)
+                    var seen = Set<String>()
+                    for landmark in sorted {
+                        let label = landmark.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let normalized = label.lowercased()
+
+                        guard !label.isEmpty,
+                              normalized != "(unlabeled)",
+                              landmark.status.lowercased() != "rejected",
+                              !seen.contains(normalized)
+                        else {
+                            continue
+                        }
+
+                        seen.insert(normalized)
+                        labels.append(label)
+                    }
+                } catch {
+                    // If map landmarks fail to load, still provide room suggestions from existing data.
                 }
 
                 if labels.isEmpty {

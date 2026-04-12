@@ -1077,22 +1077,37 @@ final class APIService {
     }
 
     func fetchRoomSuggestions(limit: Int = 20) async throws -> [String] {
-        let maps = try await fetchMaps(limit: max(1, min(limit, 100)), offset: 0)
+        let clampedLimit = max(1, min(limit, 100))
+        let maps = try? await fetchMaps(limit: clampedLimit, offset: 0)
+        let scans = try? await fetchScans(limit: min(clampedLimit * 3, 100), offset: 0)
+
+        if maps == nil && scans == nil {
+            throw URLError(.badServerResponse)
+        }
+
         var seen = Set<String>()
         var output: [String] = []
 
-        for map in maps {
-            let room = map.roomName.trimmingCharacters(in: .whitespacesAndNewlines)
+        func appendRoomSuggestion(_ candidate: String) {
+            let room = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalized = room.lowercased()
             guard !room.isEmpty, !seen.contains(normalized) else {
-                continue
+                return
             }
 
             seen.insert(normalized)
             output.append(room)
         }
 
-        return output
+        for map in maps ?? [] {
+            appendRoomSuggestion(map.roomName)
+        }
+
+        for scan in scans ?? [] {
+            appendRoomSuggestion(scan.roomName)
+        }
+
+        return Array(output.prefix(clampedLimit))
     }
 
     func fetchMapGraph(mapId: String) async throws -> MapGraphResponse {
