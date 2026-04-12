@@ -1,14 +1,20 @@
 import { Request, Response } from "express";
 
-const router = require('express').Router();
+const router = require("express").Router();
 
-// Import route handlers
+router.use("/navigate", require("./navigation"));
+router.use("/hazards", require("./hazards"));
+router.use("/scans", require("./scans"));
+router.use("/maps", require("./maps"));
+router.use("/landmarks", require("./landmarks"));
 
-// Define routes
-
-// health check
-router.get('/health', (req: Request, res: Response) => {
-    res.sendStatus(200);
+router.get("/health", (req: Request, res: Response) => {
+    res.json({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        supabase: !!process.env.SUPABASE_URL,
+        gemini: !!process.env.GEMINI_API_KEY,
+    });
 });
 
 module.exports = router;
