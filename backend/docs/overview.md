@@ -43,15 +43,16 @@ This creates a graph-based representation of indoor spaces.
 
 - Receives scan uploads
 - Validates and processes data
-- Sends images to Gemini Vision for object detection
+- Sends keyframes to Google Cloud Vision API for object detection
 - Builds navigation graphs
 - Stores structured maps in database
 
 ### AI Layer
 
-- Google Gemini Vision processes images
+- Google Cloud Vision API processes images
 - Returns object labels and confidence scores
 - Helps identify landmarks and hazards
+- Google Gemini generates natural-language navigation guidance
 
 ### Database Layer
 
@@ -71,7 +72,7 @@ This creates a graph-based representation of indoor spaces.
 4. Data is sent to backend API
 5. Backend processes:
    - Validates input
-   - Sends images to Gemini Vision
+   - Sends images to Vision API
    - Converts raw path into nodes
    - Attaches AI-generated labels
 6. Structured graph is stored in database
@@ -93,13 +94,13 @@ Output is converted into a structured JSON payload containing:
 
 - Scan points (Vector3 positions)
 - Landmarks (type, label, position)
-- Metadata (userId, room name)
+- Metadata (room name, device and timing info)
 
 ---
 
-## 7. Backend Processing (Gemini AI)
+## 7. Backend Processing (Vision + Gemini)
 
-The backend sends selected images to Google Gemini Vision to:
+The backend sends selected images to Google Cloud Vision API to:
 
 - Detect objects in each frame
 - Identify doors, obstacles, furniture, and signs
@@ -196,7 +197,8 @@ Output is delivered via audio and haptic feedback.
 
 ### AI
 
-- Google Gemini Vision API
+- Google Cloud Vision API (image detections)
+- Google Gemini API (navigation text instructions)
 
 ---
 
@@ -228,7 +230,7 @@ Optional:
 
 ### Phase 2 – AI Enhancement
 
-- Integrate Gemini Vision
+- Integrate Vision API
 - Auto-detect objects
 - Attach labels to landmarks
 

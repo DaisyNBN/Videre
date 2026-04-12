@@ -1,4 +1,111 @@
-const router = require('express').Router();
+import { Request, Response, Router } from "express";
+import { ApiResponse } from "../src/ApiResponse";
+import { validateBody } from "../src/middleware/validate";
+import logger from "../src/services/logger";
+import {
+  generateNavigationRoute,
+  getNavigationInstruction,
+  NavigationError,
+  rerouteNavigation,
+} from "../src/services/processNavigation";
+import { NavRequest } from "../src/types";
+import {
+  navigationInstructionBodySchema,
+  NavigationInstructionBody,
+  navigationRerouteBodySchema,
+  NavigationRerouteBody,
+  navigationRouteBodySchema,
+  NavigationRouteBody,
+} from "../src/schemas/navigation";
 
+const router = Router();
 
-module.exports = router;
+function buildInstructionRequest(body: NavigationInstructionBody): NavRequest {
+  const routeIdRaw =
+    body.route_id ?? body.routeId ?? "";
+
+  return {
+    route_id: routeIdRaw,
+    location: body.location,
+    heading_degrees:
+      body.heading_degrees ?? body.headingDegrees ?? 0,
+    obstacles: body.obstacles,
+    speed: body.speed,
+  };
+}
+
+async function handleInstructionRequest(req: Request, res: Response): Promise<void> {
+  try {
+    const instructionRequest = buildInstructionRequest(
+      req.body as NavigationInstructionBody,
+    );
+
+    const response = await getNavigationInstruction(instructionRequest);
+
+    res.json(new ApiResponse(true, "Navigation instruction generated", response));
+  } catch (err) {
+    if (err instanceof NavigationError) {
+      res.status(err.statusCode).json(new ApiResponse(false, err.message));
+      return;
+    }
+
+    logger.error("Navigation instruction error: %o", err);
+    res.status(500).json(new ApiResponse(false, "Internal server error"));
+  }
+}
+
+router.post("/", validateBody(navigationInstructionBodySchema), handleInstructionRequest);
+
+router.post(
+  "/instructions",
+  validateBody(navigationInstructionBodySchema),
+  handleInstructionRequest,
+);
+
+router.post("/routes", validateBody(navigationRouteBodySchema), async (req: Request, res: Response) => {
+  const body = req.body as NavigationRouteBody;
+
+  try {
+    const route = await generateNavigationRoute({
+      mapId: body.mapId,
+      startNodeId: body.startNodeId,
+      endNodeId: body.endNodeId,
+      blockedNodeIds: body.blockedNodeIds,
+    });
+
+    return res.status(201).json(new ApiResponse(true, "Route generated", route));
+  } catch (err) {
+    if (err instanceof NavigationError) {
+      return res.status(err.statusCode).json(new ApiResponse(false, err.message));
+    }
+
+    logger.error("Navigation route generation error: %o", err);
+    return res.status(500).json(new ApiResponse(false, "Failed to generate route"));
+  }
+});
+
+router.post("/reroute", validateBody(navigationRerouteBodySchema), async (req: Request, res: Response) => {
+  const body = req.body as NavigationRerouteBody;
+
+  try {
+    const reroute = await rerouteNavigation({
+      mapId: body.mapId,
+      startNodeId: body.startNodeId,
+      endNodeId: body.endNodeId,
+      blockedNodeIds: body.blockedNodeIds,
+      obstacleNodeIds: body.obstacleNodeIds,
+      reason: body.reason,
+    });
+
+    return res.status(201).json(new ApiResponse(true, "Route recalculated", reroute));
+  } catch (err) {
+    if (err instanceof NavigationError) {
+      return res.status(err.statusCode).json(new ApiResponse(false, err.message));
+    }
+
+    logger.error("Navigation reroute error: %o", err);
+    return res.status(500).json(new ApiResponse(false, "Failed to reroute"));
+  }
+});
+
+export default router;

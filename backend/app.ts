@@ -1,6 +1,9 @@
 import express from "express";
 import cors from "cors";
-require("dotenv").config();
+import "dotenv/config";
+import routes from "./routes/index";
+import { ApiResponse } from "./src/ApiResponse";
+import { errorHandler } from "./src/middleware/errorHandler";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,7 +21,13 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use('/api', require('./routes/index'));
+app.use('/api', routes);
+
+app.use('/api/*', (_req, res) => {
+    res.status(404).json(new ApiResponse(false, 'Route not found'));
+});
+
+app.use(errorHandler);
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
