@@ -2,13 +2,8 @@ import { randomUUID } from "crypto";
 import { NavRequest, NavResponse } from "../types";
 import { supabase } from "./supabase";
 import { haversineMeters } from "../utils/distance";
-import { getGeminiNavResponse } from "./gemini";
-import { getFallbackResponse } from "../fallback";
 import { getNearbyHazards } from "./processHazard";
 import logger from "./logger";
-
-const USE_GEMINI_NAVIGATION =
-  String(process.env.NAVIGATION_USE_GEMINI ?? "false").toLowerCase() === "true";
 
 export class NavigationError extends Error {
   statusCode: number;
@@ -575,18 +570,40 @@ function buildDeterministicRouteResponse(
     (obstacle) => obstacle.distance_estimate === "near" && obstacle.position === "center",
   );
   if (blocking) {
-    return getFallbackResponse(request.obstacles, checkpointSummary);
+    return {
+      instruction: `${blocking.label} ahead. Stop. Step right.`,
+      urgency: "high",
+      haptic_pattern: "continuous",
+      next_checkpoint: checkpointSummary?.label ?? null,
+      distance_to_next_m: checkpointSummary?.distance ?? null,
+      fallback_used: false,
+    };
   }
 
   const nearbyObstacle = request.obstacles.find(
     (obstacle) => obstacle.distance_estimate === "near",
   );
   if (nearbyObstacle) {
-    return getFallbackResponse(request.obstacles, checkpointSummary);
+    const avoidDir = nearbyObstacle.position === "left" ? "right" : "left";
+    return {
+      instruction: `${nearbyObstacle.label} on your ${nearbyObstacle.position}. Keep ${avoidDir}.`,
+      urgency: "medium",
+      haptic_pattern: "double_tap",
+      next_checkpoint: checkpointSummary?.label ?? null,
+      distance_to_next_m: checkpointSummary?.distance ?? null,
+      fallback_used: false,
+    };
   }
 
   if (!checkpointContext) {
-    return getFallbackResponse(request.obstacles, undefined);
+    return {
+      instruction: "Continue straight. Path is clear.",
+      urgency: "low",
+      haptic_pattern: "single_tap",
+      next_checkpoint: null,
+      distance_to_next_m: null,
+      fallback_used: false,
+    };
   }
 
   let urgency: NavResponse["urgency"] = "low";
@@ -626,7 +643,7 @@ function buildDeterministicRouteResponse(
     haptic_pattern: hapticPattern,
     next_checkpoint: checkpointContext.target.label,
     distance_to_next_m: Number(checkpointContext.target.distance.toFixed(1)),
-    fallback_used: true,
+    fallback_used: false,
   };
 }
 
@@ -971,21 +988,10 @@ export async function getNavigationInstruction(
       adaptiveThresholds.checkpointAdvanceDistanceM,
     )
     : undefined;
-  const checkpointSummary = toCheckpointSummary(checkpointContext);
-
-  let response: NavResponse = buildDeterministicRouteResponse(
+  const response: NavResponse = buildDeterministicRouteResponse(
     request,
     checkpointContext,
   );
-
-  if (USE_GEMINI_NAVIGATION) {
-    try {
-      response = await getGeminiNavResponse(request, checkpointSummary);
-    } catch (err) {
-      logger.error("Gemini failed in navigation pipeline: %o", err);
-      response = buildDeterministicRouteResponse(request, checkpointContext);
-    }
-  }
 
   const hazards = await getNearbyHazards(
     request.location.lat,

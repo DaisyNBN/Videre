@@ -7,8 +7,22 @@
 
 import Foundation
 import ARKit
+import CoreLocation
 import simd
 import UIKit
+
+private struct AnchorReuseRecord: Codable {
+    let roomKey: String
+    let roomName: String
+    let latitude: Double
+    let longitude: Double
+    let localX: Float
+    let localY: Float
+    let localZ: Float
+    let mapId: String
+    let routeId: String
+    let recordedAtEpoch: TimeInterval
+}
 
 class ScanService: NSObject, ObservableObject {
 
@@ -27,6 +41,7 @@ class ScanService: NSObject, ObservableObject {
     @Published var aiDetectionsCount: Int = 0
     @Published var mapLandmarks: [MapLandmarkRecord] = []
     @Published var mapActionStatus: String = ""
+    @Published var anchorReuseStatus: String = ""
 
     // ── Session data ──────────────────────────────────
     private var scanId:         String            = ""
@@ -54,10 +69,22 @@ class ScanService: NSObject, ObservableObject {
     private let meshLandmarkInterval: TimeInterval = 2.0
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
-    /// Position change threshold: 3.0 meters (only capture when user walks much further).
-    private let positionChangeThreshold: Float = 3.0
+    /// Rotation threshold to trigger new keyframe: 15 degrees.
+    private let rotationThresholdDegrees: Float = 15.0
+    /// Position change threshold: 0.5 meters.
+    private let positionChangeThreshold: Float = 0.5
     /// Hard image budget per scan to avoid excessive backend image analysis spend.
     private let maxImageKeyframesPerScan: Int = 24
+    /// Skip new keyframe image capture when user starts near a known anchor.
+    private var suppressKeyframeCaptureForCurrentScan = false
+    private var activeAnchorReuseRecord: AnchorReuseRecord?
+
+    private let anchorReuseCacheKey = "videre.anchorReuse.cache.v1"
+    private let anchorReuseDistanceMeters: CLLocationDistance = 12
+    private let anchorReuseDedupDistanceMeters: CLLocationDistance = 4
+    private let anchorReuseCacheMaxRecords = 24
+    private let anchorReuseMaxAgeSeconds: TimeInterval = 7 * 24 * 60 * 60
+
     /// Dedupe ARKit mesh landmarks (meters).
     private var arkitLandmarkCentroids: [simd_float3] = []
     private let arkitLandmarkMinSpacing: Float = 1.0
@@ -66,12 +93,28 @@ class ScanService: NSObject, ObservableObject {
     // used for adding landmarks
     private(set) var currentPosition: simd_float3 = .zero
     private var lastKeyframePosition: simd_float3 = .zero
+    private var lastKeyframeRotation: simd_quatf = simd_quatf()
     private var lastKeyframeCacheClearTime: Date = Date()
+    private var didLogKeyframeBudgetReached = false
+    private let locationManager = CLLocationManager()
+    private var lastKnownLocation: CLLocation?
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+        locationManager.distanceFilter = 3
+    }
 
     // ── Start ─────────────────────────────────────────
     func startScan(
             roomName: String,
             userId: String = DeviceIdentity.userId) {
+        startLocationTrackingIfNeeded()
+        if let currentLocation = locationManager.location {
+            lastKnownLocation = currentLocation
+        }
+
         self.scanId         = UUID().uuidString
         self.userId         = userId
         self.roomName       = roomName
@@ -88,7 +131,11 @@ class ScanService: NSObject, ObservableObject {
         lastDepthTime          = 0
         lastMeshLandmarkTime   = 0
         lastKeyframePosition   = .zero
+        lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
+        didLogKeyframeBudgetReached = false
+        suppressKeyframeCaptureForCurrentScan = false
+        activeAnchorReuseRecord = nil
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
@@ -100,7 +147,10 @@ class ScanService: NSObject, ObservableObject {
         aiDetectionsCount   = 0
         mapLandmarks        = []
         mapActionStatus     = ""
+        anchorReuseStatus   = ""
         APIService.shared.clearActiveRouteContext()
+
+        configureAnchorReuseForNewScan()
     }
 
     // ── Stop and upload ───────────────────────────────
@@ -134,14 +184,14 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Called from LiDARService every AR frame ────────
     func onARFrame(_ frame: ARFrame) {
-        guard isScanning else { return }
-
         let t   = frame.camera.transform
         currentPosition = simd_float3(
             t.columns.3.x,
             t.columns.3.y,
             t.columns.3.z
         )
+
+        guard isScanning else { return }
 
         let now = frame.timestamp
 
@@ -151,7 +201,7 @@ class ScanService: NSObject, ObservableObject {
             addPoint(frame: frame)
         }
 
-        // Capture keyframes only when position changes or user rotates 180 degrees
+        // Capture keyframes only when environment changes
         let cameraRotation = simd_quatf(frame.camera.transform)
         if shouldCaptureNewKeyframe(
             newPosition: currentPosition,
@@ -160,7 +210,7 @@ class ScanService: NSObject, ObservableObject {
             now: now) {
             lastKeyframeTime = now
             lastKeyframePosition = currentPosition
-
+            lastKeyframeRotation = cameraRotation
             captureKeyframe(frame: frame)
         }
 
@@ -187,14 +237,39 @@ class ScanService: NSObject, ObservableObject {
             newRotation: simd_quatf,
             lastTime: TimeInterval,
             now: TimeInterval) -> Bool {
+
+        if suppressKeyframeCaptureForCurrentScan {
+            return false
+        }
+
+        if keyframes.count >= maxImageKeyframesPerScan {
+            if !didLogKeyframeBudgetReached {
+                didLogKeyframeBudgetReached = true
+                print("Keyframe budget reached (\(maxImageKeyframesPerScan)); skipping additional image capture")
+            }
+            return false
+        }
         
         // Always capture for first keyframe
         if keyframes.isEmpty {
             return true
         }
 
-        // Check position change (3.0 meters threshold)
-        // ONLY trigger on significant physical movement, ignore rotation entirely
+        // Check time-based fallback (every 5 seconds at most)
+        if now - lastTime >= KEYFRAME_INTERVAL {
+            return true
+        }
+
+        // Check rotation change (15 degrees threshold)
+        let rotationDiff = rotationAngleDifference(
+            lastKeyframeRotation,
+            newRotation)
+        if rotationDiff >= rotationThresholdDegrees {
+            print("New keyframe: rotation changed by \(rotationDiff)°")
+            return true
+        }
+
+        // Check position change (0.5 meters threshold)
         let positionDiff = simd_distance(
             lastKeyframePosition,
             newPosition)
@@ -203,24 +278,18 @@ class ScanService: NSObject, ObservableObject {
             return true
         }
 
-        // Check time-based fallback (every 5 seconds at most)
-        // AND check 5-hour cache expiration restriction
-        let cacheExpired = Date().timeIntervalSince(lastKeyframeCacheClearTime) >= imageCacheExpiration
-        if now - lastTime >= KEYFRAME_INTERVAL && cacheExpired {
-            print("New keyframe: timeout reached and cache valid")
-            return true
-        }
-
-        // If cache has expired but time hasn't reached interval, still allow capture
-        if cacheExpired && now - lastTime >= (KEYFRAME_INTERVAL / 2.0) {
-            print("New keyframe: cache expired - allowing update")
-            return true
-        }
-
         return false
     }
 
-
+    // ── Calculate angle between two rotations ─────────────────
+    private func rotationAngleDifference(
+            _ rot1: simd_quatf,
+            _ rot2: simd_quatf) -> Float {
+        let diff = simd_inverse(rot1) * rot2
+        let angleRadians = 2.0 * acos(simd_clamp(diff.real, -1.0, 1.0))
+        let angleDegrees = angleRadians * 180.0 / .pi
+        return abs(angleDegrees)
+    }
 
     // ── Add user landmark at current position ──────────
     func addLandmark(type: String, label: String) {
@@ -319,6 +388,10 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Capture keyframe image ────────────────────────
     private func captureKeyframe(frame: ARFrame) {
+        guard keyframes.count < maxImageKeyframesPerScan else {
+            return
+        }
+
         let t     = frame.camera.transform
         let pose  = CameraPose(
             x: t.columns.3.x,
@@ -597,6 +670,8 @@ class ScanService: NSObject, ObservableObject {
                 backendRouteId = routeId
             }
 
+            persistAnchorReuseRecord(mapId: mapId, routeId: routeId)
+
             finalStatus = "Upload complete — map and route ready"
         } catch {
             finalStatus = "Error: \(error.localizedDescription)"
@@ -802,6 +877,133 @@ class ScanService: NSObject, ObservableObject {
         return syncedCount
     }
 
+    private func startLocationTrackingIfNeeded() {
+        switch locationManager.authorizationStatus {
+        case .notDetermined:
+            locationManager.requestWhenInUseAuthorization()
+        case .authorizedWhenInUse, .authorizedAlways:
+            locationManager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    private func normalizeRoomKey(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func loadAnchorReuseRecords() -> [AnchorReuseRecord] {
+        guard let data = UserDefaults.standard.data(forKey: anchorReuseCacheKey) else {
+            return []
+        }
+
+        guard let records = try? JSONDecoder().decode([AnchorReuseRecord].self, from: data) else {
+            return []
+        }
+
+        return records
+    }
+
+    private func saveAnchorReuseRecords(_ records: [AnchorReuseRecord]) {
+        guard let data = try? JSONEncoder().encode(records) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: anchorReuseCacheKey)
+    }
+
+    private func activeAnchorCandidate(
+            for roomName: String,
+            at currentLocation: CLLocation
+    ) -> (record: AnchorReuseRecord, distanceMeters: CLLocationDistance)? {
+        let roomKey = normalizeRoomKey(roomName)
+        let now = Date().timeIntervalSince1970
+
+        let fresh = loadAnchorReuseRecords().filter {
+            now - $0.recordedAtEpoch <= anchorReuseMaxAgeSeconds
+        }
+
+        let candidates = fresh.filter { $0.roomKey == roomKey }
+        guard !candidates.isEmpty else {
+            return nil
+        }
+
+        let nearest = candidates
+            .map { record -> (record: AnchorReuseRecord, distanceMeters: CLLocationDistance) in
+                let anchorLocation = CLLocation(latitude: record.latitude, longitude: record.longitude)
+                let distance = currentLocation.distance(from: anchorLocation)
+                return (record, distance)
+            }
+            .min(by: { $0.distanceMeters < $1.distanceMeters })
+
+        guard let nearest,
+              nearest.distanceMeters <= anchorReuseDistanceMeters
+        else {
+            return nil
+        }
+
+        return nearest
+    }
+
+    private func configureAnchorReuseForNewScan() {
+        guard let currentLocation = lastKnownLocation else {
+            anchorReuseStatus = "No GPS fix yet; capturing new keyframes"
+            return
+        }
+
+        guard let candidate = activeAnchorCandidate(for: roomName, at: currentLocation) else {
+            anchorReuseStatus = "No nearby saved anchor; capturing new keyframes"
+            return
+        }
+
+        suppressKeyframeCaptureForCurrentScan = true
+        activeAnchorReuseRecord = candidate.record
+        anchorReuseStatus = String(
+            format: "Reusing saved anchor %.0f m away; skipping new keyframe photos",
+            candidate.distanceMeters
+        )
+    }
+
+    private func persistAnchorReuseRecord(mapId: String, routeId: String) {
+        guard let currentLocation = lastKnownLocation else {
+            return
+        }
+
+        let roomKey = normalizeRoomKey(roomName)
+        guard !roomKey.isEmpty else {
+            return
+        }
+
+        let newRecord = AnchorReuseRecord(
+            roomKey: roomKey,
+            roomName: roomName,
+            latitude: currentLocation.coordinate.latitude,
+            longitude: currentLocation.coordinate.longitude,
+            localX: currentPosition.x,
+            localY: currentPosition.y,
+            localZ: currentPosition.z,
+            mapId: mapId,
+            routeId: routeId,
+            recordedAtEpoch: Date().timeIntervalSince1970
+        )
+
+        var records = loadAnchorReuseRecords().filter { existing in
+            let existingLocation = CLLocation(latitude: existing.latitude, longitude: existing.longitude)
+            let distance = existingLocation.distance(from: currentLocation)
+            let sameRoom = existing.roomKey == roomKey
+            return !(sameRoom && distance <= anchorReuseDedupDistanceMeters)
+        }
+
+        records.insert(newRecord, at: 0)
+        if records.count > anchorReuseCacheMaxRecords {
+            records = Array(records.prefix(anchorReuseCacheMaxRecords))
+        }
+
+        saveAnchorReuseRecords(records)
+    }
+
     // ── Helpers ───────────────────────────────────────
     private func currentMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
@@ -843,6 +1045,32 @@ class ScanService: NSObject, ObservableObject {
         case .limited(.insufficientFeatures): return "limited"
         case .notAvailable:                   return "unavailable"
         default:                              return "limited"
+        }
+    }
+}
+
+extension ScanService: CLLocationManagerDelegate {
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    func locationManager(
+            _ manager: CLLocationManager,
+            didUpdateLocations locations: [CLLocation]
+    ) {
+        guard let latest = locations.last else {
+            return
+        }
+
+        lastKnownLocation = latest
+
+        if isScanning && keyframes.isEmpty && !suppressKeyframeCaptureForCurrentScan {
+            configureAnchorReuseForNewScan()
         }
     }
 }

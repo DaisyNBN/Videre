@@ -56,6 +56,14 @@ struct ExistingMapRecord: Identifiable {
     let version: Int
 }
 
+struct NearbyMapCandidate: Identifiable {
+    let mapId: String
+    let roomName: String
+    let distanceMeters: Double?
+
+    var id: String { mapId }
+}
+
 struct ExistingScanRecord: Identifiable {
     let id: String
     let roomName: String
@@ -112,13 +120,24 @@ final class APIService {
         let lng: Double
     }
 
+    private struct MapGeoAnchor: Codable {
+        let mapId: String
+        var roomName: String?
+        let latitude: Double
+        let longitude: Double
+        let updatedAt: TimeInterval
+    }
+
     static let shared = APIService()
-    private init() {}
+    private init() {
+        loadMapGeoAnchorsFromDefaults()
+    }
 
     private static let activeRouteIdKey = "videre.activeRouteId"
     private static let activeMapIdKey = "videre.activeMapId"
     private static let activeStartNodeIdKey = "videre.activeStartNodeId"
     private static let activeEndNodeIdKey = "videre.activeEndNodeId"
+    private static let mapGeoAnchorsKey = "videre.mapGeoAnchors.v1"
 
     private static let normalizedApiBaseURL = {
         let trimmed = Secrets.apiURL
@@ -135,6 +154,7 @@ final class APIService {
     private var cachedRouteNodeIds: [String] = []
     private var routeGeoCalibration: RouteGeoCalibration?
     private var lastGeoCalibrationSample: (lat: Double, lng: Double)?
+    private var mapGeoAnchorsByMapId: [String: MapGeoAnchor] = [:]
 
     var activeRouteId: String? {
         UserDefaults.standard.string(forKey: Self.activeRouteIdKey)
@@ -242,6 +262,91 @@ final class APIService {
             metersPerUnit: 1
         )
         lastGeoCalibrationSample = (lat: latitude, lng: longitude)
+        upsertMapGeoAnchor(
+            mapId: mapId,
+            roomName: nil,
+            latitude: latitude,
+            longitude: longitude
+        )
+    }
+
+    func distanceToKnownMapAnchor(
+            mapId: String,
+            latitude: Double,
+            longitude: Double
+    ) -> Double? {
+        guard let anchor = mapGeoAnchorsByMapId[mapId] else {
+            return nil
+        }
+
+        return haversineMeters(
+            lat1: latitude,
+            lng1: longitude,
+            lat2: anchor.latitude,
+            lng2: anchor.longitude
+        )
+    }
+
+    func fetchNearbyMapCandidates(
+            latitude: Double,
+            longitude: Double,
+            radiusMeters: Double = 220,
+            limit: Int = 10
+    ) async throws -> [NearbyMapCandidate] {
+        let clampedLimit = max(1, min(limit, 30))
+        let maps = try await fetchMaps(limit: min(clampedLimit * 6, 100), offset: 0)
+        guard !maps.isEmpty else {
+            return []
+        }
+
+        refreshMapAnchorRoomNames(using: maps)
+
+        let clampedRadius = max(15, radiusMeters)
+        var nearby: [NearbyMapCandidate] = []
+
+        for map in maps {
+            if let distance = distanceToKnownMapAnchor(
+                mapId: map.id,
+                latitude: latitude,
+                longitude: longitude
+            ), distance <= clampedRadius {
+                nearby.append(
+                    NearbyMapCandidate(
+                        mapId: map.id,
+                        roomName: map.roomName,
+                        distanceMeters: distance
+                    )
+                )
+            }
+        }
+
+        let sortedNearby = nearby.sorted { lhs, rhs in
+            let lhsDistance = lhs.distanceMeters ?? .greatestFiniteMagnitude
+            let rhsDistance = rhs.distanceMeters ?? .greatestFiniteMagnitude
+            if lhsDistance == rhsDistance {
+                return lhs.roomName.localizedCaseInsensitiveCompare(rhs.roomName) == .orderedAscending
+            }
+            return lhsDistance < rhsDistance
+        }
+
+        if !sortedNearby.isEmpty {
+            return Array(sortedNearby.prefix(clampedLimit))
+        }
+
+        // Fallback for maps that don't have a known geo anchor yet.
+        let fallback = maps.prefix(clampedLimit).map { map in
+            NearbyMapCandidate(
+                mapId: map.id,
+                roomName: map.roomName,
+                distanceMeters: distanceToKnownMapAnchor(
+                    mapId: map.id,
+                    latitude: latitude,
+                    longitude: longitude
+                )
+            )
+        }
+
+        return fallback
     }
 
     func refineRouteGeoCalibration(
@@ -686,6 +791,86 @@ final class APIService {
             .filter { $0 != activeStartNodeId && $0 != activeEndNodeId }
 
         return Array(filtered.prefix(safeMax))
+    }
+
+    private func loadMapGeoAnchorsFromDefaults() {
+        guard let data = UserDefaults.standard.data(forKey: Self.mapGeoAnchorsKey) else {
+            return
+        }
+
+        guard let decoded = try? JSONDecoder().decode([MapGeoAnchor].self, from: data) else {
+            return
+        }
+
+        mapGeoAnchorsByMapId = Dictionary(
+            uniqueKeysWithValues: decoded.map { anchor in
+                (anchor.mapId, anchor)
+            }
+        )
+    }
+
+    private func persistMapGeoAnchorsToDefaults() {
+        let anchors = mapGeoAnchorsByMapId.values.sorted { lhs, rhs in
+            lhs.updatedAt > rhs.updatedAt
+        }
+
+        guard let data = try? JSONEncoder().encode(anchors) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: Self.mapGeoAnchorsKey)
+    }
+
+    private func upsertMapGeoAnchor(
+            mapId: String,
+            roomName: String?,
+            latitude: Double,
+            longitude: Double
+    ) {
+        guard !mapId.isEmpty else {
+            return
+        }
+
+        let previous = mapGeoAnchorsByMapId[mapId]
+        let mergedRoomName = roomName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedRoomName: String?
+        if let mergedRoomName, !mergedRoomName.isEmpty {
+            resolvedRoomName = mergedRoomName
+        } else {
+            resolvedRoomName = previous?.roomName
+        }
+
+        mapGeoAnchorsByMapId[mapId] = MapGeoAnchor(
+            mapId: mapId,
+            roomName: resolvedRoomName,
+            latitude: latitude,
+            longitude: longitude,
+            updatedAt: Date().timeIntervalSince1970
+        )
+
+        persistMapGeoAnchorsToDefaults()
+    }
+
+    private func refreshMapAnchorRoomNames(using maps: [ExistingMapRecord]) {
+        var didMutate = false
+
+        for map in maps {
+            guard var anchor = mapGeoAnchorsByMapId[map.id] else {
+                continue
+            }
+
+            if anchor.roomName?.localizedCaseInsensitiveCompare(map.roomName) == .orderedSame {
+                continue
+            }
+
+            anchor.roomName = map.roomName
+            mapGeoAnchorsByMapId[map.id] = anchor
+            didMutate = true
+        }
+
+        if didMutate {
+            persistMapGeoAnchorsToDefaults()
+        }
     }
 
     private func haversineMeters(

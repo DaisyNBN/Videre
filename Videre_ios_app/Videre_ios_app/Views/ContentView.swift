@@ -2,6 +2,25 @@ import SwiftUI
 import Combine
 import UIKit
 
+private struct DestinationSuggestionItem: Hashable, Identifiable {
+    let label: String
+    let mapId: String
+    let mapRoomName: String
+    let distanceMeters: Double?
+
+    var id: String {
+        "\(mapId.lowercased())|\(label.lowercased())"
+    }
+
+    var chipText: String {
+        if let distanceMeters {
+            return "\(label) • \(mapRoomName) • \(Int(distanceMeters.rounded()))m"
+        }
+
+        return "\(label) • \(mapRoomName)"
+    }
+}
+
 struct ContentView: View {
 
     @EnvironmentObject var ble:   BLEManager
@@ -21,7 +40,8 @@ struct ContentView: View {
     @State private var destinationRoomLabel: String = ""
     @State private var isDestinationRouteInFlight: Bool = false
     @State private var destinationRouteStatus: String = ""
-    @State private var destinationSuggestions: [String] = []
+    @State private var destinationSuggestions: [DestinationSuggestionItem] = []
+    @State private var selectedSuggestionMapId: String? = nil
     @State private var destinationSuggestionsStatus: String = ""
     @State private var isDestinationSuggestionsLoading: Bool = false
     @State private var recentDestinations: [String] = []
@@ -159,6 +179,7 @@ struct ContentView: View {
                                         ForEach(recentDestinations, id: \.self) { destination in
                                             Button {
                                                 destinationRoomLabel = destination
+                                                selectedSuggestionMapId = nil
                                                 routeToDestinationRoom(destinationOverride: destination)
                                             } label: {
                                                 HStack(spacing: 5) {
@@ -217,11 +238,12 @@ struct ContentView: View {
                         if !destinationSuggestions.isEmpty {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 8) {
-                                    ForEach(destinationSuggestions, id: \.self) { suggestion in
+                                    ForEach(destinationSuggestions) { suggestion in
                                         Button {
-                                            destinationRoomLabel = suggestion
+                                            destinationRoomLabel = suggestion.label
+                                            selectedSuggestionMapId = suggestion.mapId
                                         } label: {
-                                            Text(suggestion)
+                                            Text(suggestion.chipText)
                                                 .font(.system(size: 12, weight: .medium))
                                                 .padding(.horizontal, 10)
                                                 .padding(.vertical, 7)
@@ -284,7 +306,7 @@ struct ContentView: View {
                         }
 
                         Button {
-                            routeToDestinationRoom()
+                            routeToDestinationRoom(mapIdOverride: selectedSuggestionMapId)
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
@@ -669,6 +691,7 @@ struct ContentView: View {
 
             let parsedDestination = parseDestinationFromVoiceCommand(transcript)
             destinationRoomLabel = parsedDestination
+            selectedSuggestionMapId = nil
             destinationRouteStatus = "Voice destination: \(parsedDestination)"
             destinationVoice.clearRoomName()
             routeToDestinationRoom(destinationOverride: parsedDestination)
@@ -699,7 +722,10 @@ struct ContentView: View {
         return "No active route. Load an existing room or start a new scan."
     }
 
-    private func routeToDestinationRoom(destinationOverride: String? = nil) {
+    private func routeToDestinationRoom(
+            destinationOverride: String? = nil,
+            mapIdOverride: String? = nil
+    ) {
         guard !isDestinationRouteInFlight else {
             return
         }
@@ -716,7 +742,19 @@ struct ContentView: View {
         destinationRouteStatus = "Preparing route to \(destination)..."
         Task {
             do {
-                let mapId = try await resolveActiveMapIdForNavigation(preferredRoomName: destination)
+                let explicitMapId = (mapIdOverride ?? selectedSuggestionMapId ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let mapId: String
+                if !explicitMapId.isEmpty {
+                    mapId = explicitMapId
+                    APIService.shared.setActiveMapId(mapId)
+                    await MainActor.run {
+                        scan.backendMapId = mapId
+                    }
+                } else {
+                    mapId = try await resolveActiveMapIdForNavigation(preferredRoomName: destination)
+                }
 
                 await MainActor.run {
                     destinationRouteStatus = "Generating route to \(destination)..."
@@ -737,6 +775,7 @@ struct ContentView: View {
                     appState.walkState = .walking
                     autoGuidanceEnabled = true
                     isDestinationRouteInFlight = false
+                    selectedSuggestionMapId = mapId
                     rememberRecentDestination(destination)
                     VoiceService.shared.speak("Route to \(destination) ready")
                     requestBackendGuidance(force: true)
@@ -761,19 +800,23 @@ struct ContentView: View {
         }
 
         isDestinationSuggestionsLoading = true
-        destinationSuggestionsStatus = "Loading destination suggestions from existing data..."
+        destinationSuggestionsStatus = "Loading destination suggestions near your location..."
 
         Task {
             do {
-                let roomSuggestions = try await APIService.shared.fetchRoomSuggestions(limit: 20)
-                var labels: [String] = roomSuggestions
+                let nearbyMaps = try await APIService.shared.fetchNearbyMapCandidates(
+                    latitude: navigation.latitude,
+                    longitude: navigation.longitude,
+                    radiusMeters: 220,
+                    limit: 8
+                )
 
-                let mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                var suggestions: [DestinationSuggestionItem] = []
+                var mapsWithLandmarkSuggestions = 0
 
-                if !mapId.isEmpty {
+                for map in nearbyMaps {
                     do {
-                        let landmarks = try await APIService.shared.fetchMapLandmarks(mapId: mapId)
+                        let landmarks = try await APIService.shared.fetchMapLandmarks(mapId: map.mapId)
                         let sorted = landmarks.sorted { lhs, rhs in
                             let lhsScore = destinationSuggestionScore(lhs)
                             let rhsScore = destinationSuggestionScore(rhs)
@@ -783,8 +826,8 @@ struct ContentView: View {
                             return lhsScore > rhsScore
                         }
 
-                        var seen = Set<String>()
-                        var landmarkLabels: [String] = []
+                        var localSeen = Set<String>()
+                        var insertedForMap = 0
                         for landmark in sorted {
                             let label = landmark.label.trimmingCharacters(in: .whitespacesAndNewlines)
                             let normalized = label.lowercased()
@@ -792,48 +835,94 @@ struct ContentView: View {
                             guard !label.isEmpty,
                                   normalized != "(unlabeled)",
                                   landmark.status.lowercased() != "rejected",
-                                  !seen.contains(normalized)
+                                  !localSeen.contains(normalized)
                             else {
                                 continue
                             }
 
-                            seen.insert(normalized)
-                            landmarkLabels.append(label)
+                            localSeen.insert(normalized)
+                            insertedForMap += 1
+                            suggestions.append(
+                                DestinationSuggestionItem(
+                                    label: label,
+                                    mapId: map.mapId,
+                                    mapRoomName: map.roomName,
+                                    distanceMeters: map.distanceMeters
+                                )
+                            )
                         }
 
-                        if !landmarkLabels.isEmpty {
-                            labels = landmarkLabels + roomSuggestions
+                        if insertedForMap > 0 {
+                            mapsWithLandmarkSuggestions += 1
+                        } else {
+                            suggestions.append(
+                                DestinationSuggestionItem(
+                                    label: map.roomName,
+                                    mapId: map.mapId,
+                                    mapRoomName: map.roomName,
+                                    distanceMeters: map.distanceMeters
+                                )
+                            )
                         }
                     } catch {
-                        // Keep room-based suggestions when active-map landmark enrichment fails.
+                        suggestions.append(
+                            DestinationSuggestionItem(
+                                label: map.roomName,
+                                mapId: map.mapId,
+                                mapRoomName: map.roomName,
+                                distanceMeters: map.distanceMeters
+                            )
+                        )
                     }
                 }
 
-                var deduped: [String] = []
+                var deduped: [DestinationSuggestionItem] = []
                 var dedupSeen = Set<String>()
-                for label in labels {
-                    let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let key = trimmed.lowercased()
-                    guard !trimmed.isEmpty, !dedupSeen.contains(key) else {
+                for suggestion in suggestions {
+                    let key = "\(suggestion.mapId.lowercased())|\(suggestion.label.lowercased())"
+                    guard !dedupSeen.contains(key) else {
                         continue
                     }
 
                     dedupSeen.insert(key)
-                    deduped.append(trimmed)
+                    deduped.append(suggestion)
                 }
 
                 await MainActor.run {
                     destinationSuggestions = Array(deduped.prefix(12))
+
+                    if selectedSuggestionMapId != nil,
+                       !destinationSuggestions.contains(where: { $0.mapId == selectedSuggestionMapId }) {
+                        selectedSuggestionMapId = nil
+                    }
+
+                    let nearbyCount = nearbyMaps.filter {
+                        guard let distance = $0.distanceMeters else {
+                            return false
+                        }
+                        return distance <= 220
+                    }.count
+
                     if destinationSuggestions.isEmpty {
-                        destinationSuggestionsStatus = "No existing map room suggestions available"
+                        destinationSuggestionsStatus = "No destination suggestions available near this location"
                     } else {
-                        destinationSuggestionsStatus = "Loaded \(destinationSuggestions.count) destination suggestions"
+                        if nearbyCount > 0 {
+                            destinationSuggestionsStatus =
+                                "Loaded \(destinationSuggestions.count) suggestions across \(nearbyCount) nearby maps"
+                        } else if mapsWithLandmarkSuggestions > 0 {
+                            destinationSuggestionsStatus =
+                                "Loaded \(destinationSuggestions.count) suggestions from known maps (geo anchors still learning)"
+                        } else {
+                            destinationSuggestionsStatus =
+                                "Loaded \(destinationSuggestions.count) room suggestions across available maps"
+                        }
                     }
                     isDestinationSuggestionsLoading = false
                 }
             } catch {
                 await MainActor.run {
                     destinationSuggestions = []
+                    selectedSuggestionMapId = nil
                     destinationSuggestionsStatus =
                         "Failed to load destination suggestions: \(error.localizedDescription)"
                     isDestinationSuggestionsLoading = false
