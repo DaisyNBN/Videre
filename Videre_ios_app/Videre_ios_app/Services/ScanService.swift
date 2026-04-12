@@ -96,6 +96,8 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframePosition   = .zero
         lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
+        lastKeyframeLidarDistance = 999.0
+        currentLidarDistance = 999.0
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
@@ -273,6 +275,7 @@ class ScanService: NSObject, ObservableObject {
         let width = CVPixelBufferGetWidth(depthMap)
         let height = CVPixelBufferGetHeight(depthMap)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
+        let elementsPerRow = bytesPerRow / MemoryLayout<Float32>.stride
 
         guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else {
             return 999.0  // Return invalid distance
@@ -285,17 +288,14 @@ class ScanService: NSObject, ObservableObject {
         let startY = (height - centerHeight) / 2
 
         var centerDistances: [Float] = []
-
         let buffer = baseAddress.assumingMemoryBound(to: Float32.self)
 
-        for y in startY..<(startY + centerHeight) {
-            for x in startX..<(startX + centerWidth) {
-                let offset = (y * bytesPerRow / MemoryLayout<Float32>.stride) + x
-                if offset < width * height {
-                    let distance = buffer[offset]
-                    if distance > 0 && distance < 999 {  // Valid range
-                        centerDistances.append(distance)
-                    }
+        for y in startY..<min(startY + centerHeight, height) {
+            for x in startX..<min(startX + centerWidth, width) {
+                let offset = y * elementsPerRow + x
+                let distance = buffer[offset]
+                if distance > 0 && distance < 999 {  // Valid range
+                    centerDistances.append(distance)
                 }
             }
         }
