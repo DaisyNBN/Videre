@@ -88,8 +88,6 @@ Include data needed for robust retry and ordering.
 
 ```json
 {
-  "scanId": "uuid",
-  "userId": "uuid",
   "roomName": "Library-2F-East",
   "startedAt": "2026-04-12T09:10:00Z",
   "endedAt": "2026-04-12T09:12:10Z",

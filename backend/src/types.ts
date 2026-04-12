@@ -114,14 +114,36 @@ export type RoomMap = {
 // API Request Types
 // ==============================
 export type ScanUploadRequest = {
-  userId: string;
   roomName: string;
+  startedAt: string;
+  endedAt: string;
+  device: DeviceInfo;
   points: ScanPoint[];
   landmarks: Landmark[];
+  keyframes: Keyframe[];
+  depthSamples: DepthSample[];
+};
+
+export type DeviceInfo = {
+  model: string;
+  osVersion: string;
+  appVersion: string;
+};
+
+export type Keyframe = {
+  imageBase64: string;
+  timestamp: number;
+  cameraPose: Vector3;
+};
+
+export type DepthSample = {
+  timestamp: number;
+  cameraPose: Vector3;
+  depthUrl: string;
 };
 
 export type AIProcessRequest = {
-  imageUrl: string;
+  imageBase64: string;
   depthData?: unknown;
   cameraPose: Vector3;
 };
