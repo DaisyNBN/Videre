@@ -46,19 +46,29 @@ class ScanService: NSObject, ObservableObject {
     private var lastDepthTime:    TimeInterval = 0
     private var lastMeshLandmarkTime: TimeInterval = 0
 
-    /// Camera pose samples for trajectory (~2 Hz per hackathon spec).
-    let POINT_INTERVAL:    TimeInterval = 0.5
-    let KEYFRAME_INTERVAL: TimeInterval = 2.0
+    /// Camera pose samples for trajectory (1 Hz - one per second).
+    let POINT_INTERVAL:    TimeInterval = 1.0
+    /// Keyframes only when environment rotates significantly or every max interval.
+    let KEYFRAME_INTERVAL: TimeInterval = 5.0
     let DEPTH_INTERVAL:    TimeInterval = 1.0
     private let meshLandmarkInterval: TimeInterval = 2.0
+    /// Cache expiration: images older than 5 hours can be updated.
+    private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
+    /// Rotation threshold to trigger new keyframe: 15 degrees.
+    private let rotationThresholdDegrees: Float = 15.0
+    /// Position change threshold: 0.5 meters.
+    private let positionChangeThreshold: Float = 0.5
 
     /// Dedupe ARKit mesh landmarks (meters).
     private var arkitLandmarkCentroids: [simd_float3] = []
     private let arkitLandmarkMinSpacing: Float = 1.0
 
-    // ── Current camera position ───────────────────────
+    // ── Current camera position & rotation tracking ──────────
     // used for adding landmarks
     private(set) var currentPosition: simd_float3 = .zero
+    private var lastKeyframePosition: simd_float3 = .zero
+    private var lastKeyframeRotation: simd_quatf = simd_quatf()
+    private var lastKeyframeCacheClearTime: Date = Date()
 
     // ── Start ─────────────────────────────────────────
     func startScan(
@@ -79,6 +89,9 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframeTime       = 0
         lastDepthTime          = 0
         lastMeshLandmarkTime   = 0
+        lastKeyframePosition   = .zero
+        lastKeyframeRotation   = simd_quatf()
+        lastKeyframeCacheClearTime = Date()
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
@@ -135,14 +148,29 @@ class ScanService: NSObject, ObservableObject {
 
         let now = frame.timestamp
 
+        // Always record trajectory points for better LiDAR coverage
         if now - lastPointTime >= POINT_INTERVAL {
             lastPointTime = now
             addPoint(frame: frame)
         }
 
-        if now - lastKeyframeTime >= KEYFRAME_INTERVAL {
+        // Capture keyframes only when environment changes
+        let cameraRotation = simd_quatf(frame.camera.transform)
+        if shouldCaptureNewKeyframe(
+            newPosition: currentPosition,
+            newRotation: cameraRotation,
+            lastTime: lastKeyframeTime,
+            now: now) {
             lastKeyframeTime = now
+            lastKeyframePosition = currentPosition
+            lastKeyframeRotation = cameraRotation
             captureKeyframe(frame: frame)
+        }
+
+        // Check if cache has expired (5 hours)
+        if Date().timeIntervalSince(lastKeyframeCacheClearTime) >= imageCacheExpiration {
+            lastKeyframeCacheClearTime = Date()
+            print("Keyframe cache expired - old images can be re-captured")
         }
 
         if now - lastDepthTime >= DEPTH_INTERVAL {
@@ -154,6 +182,54 @@ class ScanService: NSObject, ObservableObject {
             lastMeshLandmarkTime = now
             addMeshClassificationLandmarks(frame: frame)
         }
+    }
+
+    // ── Determine if we should capture a new keyframe ─────────
+    private func shouldCaptureNewKeyframe(
+            newPosition: simd_float3,
+            newRotation: simd_quatf,
+            lastTime: TimeInterval,
+            now: TimeInterval) -> Bool {
+        
+        // Always capture for first keyframe
+        if keyframes.isEmpty {
+            return true
+        }
+
+        // Check time-based fallback (every 5 seconds at most)
+        if now - lastTime >= KEYFRAME_INTERVAL {
+            return true
+        }
+
+        // Check rotation change (15 degrees threshold)
+        let rotationDiff = rotationAngleDifference(
+            lastKeyframeRotation,
+            newRotation)
+        if rotationDiff >= rotationThresholdDegrees {
+            print("New keyframe: rotation changed by \(rotationDiff)°")
+            return true
+        }
+
+        // Check position change (0.5 meters threshold)
+        let positionDiff = simd_distance(
+            lastKeyframePosition,
+            newPosition)
+        if positionDiff >= positionChangeThreshold {
+            print("New keyframe: position changed by \(positionDiff)m")
+            return true
+        }
+
+        return false
+    }
+
+    // ── Calculate angle between two rotations ─────────────────
+    private func rotationAngleDifference(
+            _ rot1: simd_quatf,
+            _ rot2: simd_quatf) -> Float {
+        let diff = simd_inverse(rot1) * rot2
+        let angleRadians = 2.0 * acos(simd_clamp(diff.w, -1.0, 1.0))
+        let angleDegrees = angleRadians * 180.0 / .pi
+        return abs(angleDegrees)
     }
 
     // ── Add user landmark at current position ──────────
@@ -234,7 +310,7 @@ class ScanService: NSObject, ObservableObject {
         print("ARKit landmark: \(label) at \(position)")
     }
 
-    // ── Collect trajectory point ───────────────────────
+    // ── Collect trajectory point (continuous LiDAR locations) ──
     private func addPoint(frame: ARFrame) {
         let t = frame.camera.transform
         let p = TrajectoryPoint(
