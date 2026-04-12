@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject var lidar: LiDARService
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var navigation: NavigationContextService
+    @EnvironmentObject var scanService: ScanService
     private let openScan: () -> Void
     @State private var lastNavigationInstruction: String = ""
     @State private var lastNavigationMeta: String = ""
@@ -105,11 +106,11 @@ struct ContentView: View {
                                 .foregroundColor(.primary)
                             
                             Text(String(format: "%.1f m above sea level", 
-                                       appState.scanService.currentAltitude))
+                                       scanService.currentAltitude))
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.secondary)
                             
-                            Text("Vertical Accuracy: ±\(String(format: "%.1f", appState.scanService.altitudeAccuracy))m")
+                            Text("Vertical Accuracy: ±\(String(format: "%.1f", scanService.altitudeAccuracy))m")
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.secondary)
                         }
