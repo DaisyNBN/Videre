@@ -4,6 +4,8 @@ struct ContentView: View {
 
     @EnvironmentObject var ble:   BLEManager
     @EnvironmentObject var lidar: LiDARService
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var navigation: NavigationContextService
 
     var body: some View {
         ScrollView {
@@ -147,7 +149,7 @@ struct ContentView: View {
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 20)
                     } else if lidar.isRunning {
-                        Text("Scanning depth in real time")
+                        Text("Scanning")
                             .font(.system(size: 12))
                             .foregroundColor(.cyan)
                             .padding(.horizontal, 20)
@@ -227,6 +229,62 @@ struct ContentView: View {
                 Divider()
                     .padding(.top, 16)
 
+                // ── Navigate API payload (matches backend NavRequest) ──
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Navigate payload")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+
+                    Toggle(isOn: Binding(
+                        get: { appState.walkState == .walking },
+                        set: { on in
+                            appState.walkState = on ? .walking : .idle
+                        }
+                    )) {
+                        Text("Walking (speed in JSON)")
+                            .font(.system(size: 14))
+                    }
+                    .padding(.horizontal, 20)
+
+                    if !navigation.locationAuthorized {
+                        Text("Location: using default lat/lng until you allow access")
+                            .font(.system(size: 11))
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 20)
+                    }
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(navigatePayloadPretty)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.primary)
+                    }
+                    .padding(.horizontal, 20)
+
+                    Button {
+                        Task {
+                            let p = navigation.payload(
+                                ble: ble,
+                                lidar: lidar,
+                                appState: appState)
+                            try? await SupabaseService.shared
+                                .postNavigate(p)
+                        }
+                    } label: {
+                        Text("Log navigate to console")
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.blue.opacity(0.12))
+                            .cornerRadius(8)
+                    }
+                    .padding(.horizontal, 20)
+                    .accessibilityLabel("Log navigate payload to console")
+                }
+                .padding(.top, 16)
+
+                Divider()
+                    .padding(.top, 16)
+
                 // ── Raw JSON debug ─────────────────────
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Debug — raw JSON")
@@ -250,6 +308,20 @@ struct ContentView: View {
                 .padding(.bottom, 40)
             }
         }
+    }
+
+    private var navigatePayloadPretty: String {
+        let p = navigation.payload(
+            ble: ble,
+            lidar: lidar,
+            appState: appState)
+        guard JSONSerialization.isValidJSONObject(p),
+              let data = try? JSONSerialization.data(
+                  withJSONObject: p,
+                  options: [.prettyPrinted, .sortedKeys]),
+              let s = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return s
     }
 
     // ── Distance color ────────────────────────────────

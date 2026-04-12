@@ -15,10 +15,12 @@ class VoiceService: NSObject {
 
     override init() {
         super.init()
+        // `.playAndRecord` so TTS and microphone (e.g. room-name speech) can
+        // both use the session; `.playback` alone yields invalid input formats.
         try? AVAudioSession.sharedInstance().setCategory(
-            .playback,
+            .playAndRecord,
             mode: .spokenAudio,
-            options: [.mixWithOthers, .duckOthers]
+            options: [.duckOthers, .defaultToSpeaker]
         )
         try? AVAudioSession.sharedInstance().setActive(true)
     }
