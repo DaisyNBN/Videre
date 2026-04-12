@@ -56,6 +56,12 @@ export const scanIdParamsSchema = z.object({
     id: z.string().min(1),
 });
 
+export const scanListQuerySchema = z.object({
+    roomName: z.string().optional(),
+    limit: z.coerce.number().int().optional(),
+    offset: z.coerce.number().int().optional(),
+});
+
 export const scanCreateBodySchema = z.object({
     roomName: z.string().min(1),
     startedAt: isoDateStringSchema,
@@ -68,4 +74,5 @@ export const scanCreateBodySchema = z.object({
 });
 
 export type ScanIdParams = z.infer<typeof scanIdParamsSchema>;
+export type ScanListQuery = z.infer<typeof scanListQuerySchema>;
 export type ScanCreateBody = z.infer<typeof scanCreateBodySchema>;

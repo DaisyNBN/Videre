@@ -48,6 +48,28 @@ struct MapContributionResult {
     let status: String
 }
 
+struct ExistingMapRecord: Identifiable {
+    let id: String
+    let roomName: String
+    let createdBy: String
+    let createdAt: String
+    let version: Int
+}
+
+struct ExistingScanRecord: Identifiable {
+    let id: String
+    let roomName: String
+    let startedAt: String
+    let endedAt: String
+    let processingStatus: String
+}
+
+struct ExistingNavigationBootstrapResult {
+    let map: ExistingMapRecord
+    let scans: [ExistingScanRecord]
+    let landmarks: [MapLandmarkRecord]
+}
+
 struct RouteCalibrationDebugSnapshot {
     let active: Bool
     let mapId: String?
@@ -911,6 +933,166 @@ final class APIService {
 
         setActiveMapId(mapId)
         return mapId
+    }
+
+    func fetchMaps(
+            roomName: String? = nil,
+            limit: Int = 25,
+            offset: Int = 0
+    ) async throws -> [ExistingMapRecord] {
+        if Constants.apiDryRun {
+            return []
+        }
+
+        var components = URLComponents(string: "\(apiBaseURL)/maps")
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: String(max(1, min(limit, 100)))),
+            URLQueryItem(name: "offset", value: String(max(0, offset))),
+        ]
+
+        if let roomName,
+           !roomName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            queryItems.append(URLQueryItem(name: "roomName", value: roomName))
+        }
+
+        components?.queryItems = queryItems
+        guard let url = components?.url else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            throw URLError(.badServerResponse)
+        }
+
+        let apiData = try extractApiData(json)
+        let rows = apiData["maps"] as? [[String: Any]] ?? []
+
+        return rows.compactMap { row in
+            guard let id = stringValue(row["id"]) else {
+                return nil
+            }
+
+            return ExistingMapRecord(
+                id: id,
+                roomName: stringValue(row["room_name"]) ?? stringValue(row["roomName"]) ?? "Unlabeled Room",
+                createdBy: stringValue(row["created_by"]) ?? stringValue(row["createdBy"]) ?? "",
+                createdAt: stringValue(row["created_at"]) ?? stringValue(row["createdAt"]) ?? "",
+                version: Int(numberAsDouble(row["version"]) ?? 1)
+            )
+        }
+    }
+
+    func fetchScans(
+            roomName: String? = nil,
+            limit: Int = 25,
+            offset: Int = 0
+    ) async throws -> [ExistingScanRecord] {
+        if Constants.apiDryRun {
+            return []
+        }
+
+        var components = URLComponents(string: "\(apiBaseURL)/scans")
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: String(max(1, min(limit, 100)))),
+            URLQueryItem(name: "offset", value: String(max(0, offset))),
+        ]
+
+        if let roomName,
+           !roomName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            queryItems.append(URLQueryItem(name: "roomName", value: roomName))
+        }
+
+        components?.queryItems = queryItems
+        guard let url = components?.url else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            throw URLError(.badServerResponse)
+        }
+
+        let apiData = try extractApiData(json)
+        let rows = apiData["scans"] as? [[String: Any]] ?? []
+
+        return rows.compactMap { row in
+            guard let id = stringValue(row["id"]) else {
+                return nil
+            }
+
+            return ExistingScanRecord(
+                id: id,
+                roomName: stringValue(row["room_name"]) ?? stringValue(row["roomName"]) ?? "Unlabeled Room",
+                startedAt: stringValue(row["started_at"]) ?? stringValue(row["startedAt"]) ?? "",
+                endedAt: stringValue(row["ended_at"]) ?? stringValue(row["endedAt"]) ?? "",
+                processingStatus: stringValue(row["processing_status"]) ?? stringValue(row["processingStatus"]) ?? "unknown"
+            )
+        }
+    }
+
+    func bootstrapFromExistingData(
+            preferredRoomName: String? = nil
+    ) async throws -> ExistingNavigationBootstrapResult? {
+        let preferredMaps = try await fetchMaps(roomName: preferredRoomName, limit: 25, offset: 0)
+        let selectedMap: ExistingMapRecord?
+
+        if let firstPreferred = preferredMaps.first {
+            selectedMap = firstPreferred
+        } else if preferredRoomName != nil {
+            selectedMap = try await fetchMaps(limit: 25, offset: 0).first
+        } else {
+            selectedMap = nil
+        }
+
+        guard let selectedMap else {
+            return nil
+        }
+
+        setActiveMapId(selectedMap.id)
+        _ = try await fetchMapGraph(mapId: selectedMap.id)
+
+        let landmarks = try await fetchMapLandmarks(mapId: selectedMap.id)
+        let scans = try await fetchScans(roomName: selectedMap.roomName, limit: 25, offset: 0)
+
+        return ExistingNavigationBootstrapResult(
+            map: selectedMap,
+            scans: scans,
+            landmarks: landmarks
+        )
+    }
+
+    func fetchRoomSuggestions(limit: Int = 20) async throws -> [String] {
+        let maps = try await fetchMaps(limit: max(1, min(limit, 100)), offset: 0)
+        var seen = Set<String>()
+        var output: [String] = []
+
+        for map in maps {
+            let room = map.roomName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = room.lowercased()
+            guard !room.isEmpty, !seen.contains(normalized) else {
+                continue
+            }
+
+            seen.insert(normalized)
+            output.append(room)
+        }
+
+        return output
     }
 
     func fetchMapGraph(mapId: String) async throws -> MapGraphResponse {

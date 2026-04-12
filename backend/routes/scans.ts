@@ -1,11 +1,13 @@
 import { Request, Response } from "express";
 import { ApiResponse } from "../src/ApiResponse";
-import { validateBody, validateParams } from "../src/middleware/validate";
+import { validateBody, validateParams, validateQuery } from "../src/middleware/validate";
 import {
     scanCreateBodySchema,
     scanIdParamsSchema,
     ScanCreateBody,
     ScanIdParams,
+    scanListQuerySchema,
+    ScanListQuery,
 } from "../src/schemas/scans";
 import logger from "../src/services/logger";
 import {
@@ -15,9 +17,33 @@ import {
     getScanById,
     getScanDetections,
     getScanProcessingStatus,
+    listScans,
 } from "../src/services/processScan";
 
 const router = require("express").Router();
+
+// GET /api/scans
+// - Return existing scans for bootstrap and discovery.
+router.get('/', validateQuery(scanListQuerySchema), async (req: Request, res: Response) => {
+    const { roomName, limit, offset } = scanListQuerySchema.parse(req.query) as ScanListQuery;
+
+    try {
+        const result = await listScans({
+            roomName,
+            limit,
+            offset,
+        });
+
+        return res.json(new ApiResponse(true, 'Scans fetched', result));
+    } catch (err) {
+        if (err instanceof ProcessScanError) {
+            return res.status(err.statusCode).json(new ApiResponse(false, err.message));
+        }
+
+        logger.error('Unexpected error listing scans: %o', err);
+        return res.status(500).json(new ApiResponse(false, 'Failed to list scans'));
+    }
+});
 
 // POST /api/scans
 // - Create a new scan upload record.

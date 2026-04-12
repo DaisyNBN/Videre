@@ -651,6 +651,7 @@ struct ContentView: View {
         }
         .onAppear {
             loadRecentDestinations()
+            bootstrapExistingNavigationData()
             refreshDestinationSuggestions()
         }
         .onChange(of: scan.backendMapId) { _ in
@@ -695,7 +696,7 @@ struct ContentView: View {
             return "Active route: \(activeRouteId)"
         }
 
-        return "No active route. Scan a room to build one."
+        return "No active route. Load an existing room or start a new scan."
     }
 
     private func routeToDestinationRoom(destinationOverride: String? = nil) {
@@ -711,24 +712,18 @@ struct ContentView: View {
             return
         }
 
-        let mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !mapId.isEmpty else {
-            destinationRouteStatus = "No active map available. Scan and upload a floor first"
-            VoiceService.shared.speak(
-                "No map is active. Please scan and upload this floor first.",
-                priority: .high
-            )
-            return
-        }
-
         isDestinationRouteInFlight = true
-        destinationRouteStatus = "Generating route to \(destination)..."
-        VoiceService.shared.speak("Generating route to \(destination).")
-
-        let position = scan.currentPosition
+        destinationRouteStatus = "Preparing route to \(destination)..."
         Task {
             do {
+                let mapId = try await resolveActiveMapIdForNavigation(preferredRoomName: destination)
+
+                await MainActor.run {
+                    destinationRouteStatus = "Generating route to \(destination)..."
+                    VoiceService.shared.speak("Generating route to \(destination).")
+                }
+
+                let position = scan.currentPosition
                 let routeId = try await APIService.shared.generateRouteToRoom(
                     mapId: mapId,
                     startX: Double(position.x),
@@ -765,19 +760,30 @@ struct ContentView: View {
             return
         }
 
-        let mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !mapId.isEmpty else {
-            destinationSuggestions = []
-            destinationSuggestionsStatus = "No active map for destination suggestions"
-            return
-        }
-
         isDestinationSuggestionsLoading = true
-        destinationSuggestionsStatus = "Loading destination suggestions..."
+        destinationSuggestionsStatus = "Loading destination suggestions from existing data..."
 
         Task {
             do {
+                var mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if mapId.isEmpty {
+                    do {
+                        mapId = try await resolveActiveMapIdForNavigation(preferredRoomName: nil)
+                    } catch {
+                        let roomSuggestions = try await APIService.shared.fetchRoomSuggestions(limit: 20)
+                        await MainActor.run {
+                            destinationSuggestions = Array(roomSuggestions.prefix(12))
+                            destinationSuggestionsStatus = destinationSuggestions.isEmpty
+                                ? "No existing rooms available yet"
+                                : "Loaded \(destinationSuggestions.count) room suggestions"
+                            isDestinationSuggestionsLoading = false
+                        }
+                        return
+                    }
+                }
+
                 let landmarks = try await APIService.shared.fetchMapLandmarks(mapId: mapId)
                 let sorted = landmarks.sorted { lhs, rhs in
                     let lhsScore = destinationSuggestionScore(lhs)
@@ -807,10 +813,15 @@ struct ContentView: View {
                     labels.append(label)
                 }
 
+                if labels.isEmpty {
+                    let roomSuggestions = try await APIService.shared.fetchRoomSuggestions(limit: 20)
+                    labels.append(contentsOf: roomSuggestions)
+                }
+
                 await MainActor.run {
                     destinationSuggestions = Array(labels.prefix(12))
                     if destinationSuggestions.isEmpty {
-                        destinationSuggestionsStatus = "No destination labels available on this map"
+                        destinationSuggestionsStatus = "No existing rooms or landmark labels available"
                     } else {
                         destinationSuggestionsStatus = "Loaded \(destinationSuggestions.count) destination suggestions"
                     }
@@ -911,6 +922,59 @@ struct ContentView: View {
         updated.insert(trimmed, at: 0)
         recentDestinations = Array(updated.prefix(maxRecentDestinations))
         UserDefaults.standard.set(recentDestinations, forKey: recentDestinationsStorageKey)
+    }
+
+    private func bootstrapExistingNavigationData() {
+        Task {
+            do {
+                guard let existing = try await APIService.shared.bootstrapFromExistingData() else {
+                    await MainActor.run {
+                        destinationSuggestionsStatus = "No existing maps found yet"
+                    }
+                    return
+                }
+
+                await MainActor.run {
+                    scan.backendMapId = existing.map.id
+                    scan.mapLandmarks = existing.landmarks
+                    destinationRouteStatus =
+                        "Loaded room \(existing.map.roomName) with \(existing.landmarks.count) landmarks and \(existing.scans.count) scans"
+                }
+            } catch {
+                await MainActor.run {
+                    destinationSuggestionsStatus =
+                        "Unable to load existing map data: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func resolveActiveMapIdForNavigation(preferredRoomName: String?) async throws -> String {
+        let existingMapId = (APIService.shared.activeMapId ?? scan.backendMapId)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !existingMapId.isEmpty {
+            return existingMapId
+        }
+
+        if let existing = try await APIService.shared.bootstrapFromExistingData(
+            preferredRoomName: preferredRoomName
+        ) {
+            await MainActor.run {
+                scan.backendMapId = existing.map.id
+                scan.mapLandmarks = existing.landmarks
+                destinationRouteStatus =
+                    "Loaded existing room \(existing.map.roomName) with \(existing.scans.count) scans"
+            }
+
+            return existing.map.id
+        }
+
+        throw NSError(
+            domain: "ContentView",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "No existing maps available"]
+        )
     }
 
     private var autoGuidanceStatus: String {

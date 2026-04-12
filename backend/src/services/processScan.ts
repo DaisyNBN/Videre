@@ -78,6 +78,14 @@ type AIDetectionRow = {
   bbox_height: number | null;
 };
 
+type ScanListRow = {
+  id: string;
+  room_name: string;
+  started_at: string;
+  ended_at: string;
+  processing_status: string | null;
+};
+
 const MAX_SCAN_KEYFRAMES_ANALYZED = Number.isFinite(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED))
   ? Math.max(1, Math.trunc(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED)))
   : 4;
@@ -801,6 +809,42 @@ export async function getScanById(scanId: string): Promise<any> {
     points: normalizedPoints.length > 0 ? normalizedPoints : fallbackPoints,
     landmarks:
       normalizedLandmarks.length > 0 ? normalizedLandmarks : fallbackLandmarks,
+  };
+}
+
+export async function listScans(filters: {
+  roomName?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  scans: ScanListRow[];
+  limit: number;
+  offset: number;
+}> {
+  const safeLimit = Math.min(Math.max(filters.limit ?? 25, 1), 100);
+  const safeOffset = Math.max(filters.offset ?? 0, 0);
+
+  let query = supabase
+    .from("scans")
+    .select("id, room_name, started_at, ended_at, processing_status")
+    .order("started_at", { ascending: false })
+    .range(safeOffset, safeOffset + safeLimit - 1);
+
+  if (typeof filters.roomName === "string" && filters.roomName.trim().length > 0) {
+    query = query.ilike("room_name", `%${filters.roomName.trim()}%`);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    logger.error("Error fetching scans list from database: %o", error);
+    throw new ProcessScanError(500, "Failed to list scans");
+  }
+
+  return {
+    scans: (data ?? []) as ScanListRow[],
+    limit: safeLimit,
+    offset: safeOffset,
   };
 }
 

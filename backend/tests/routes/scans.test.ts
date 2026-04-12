@@ -8,12 +8,14 @@ const {
     mockGetScanById,
     mockGetScanDetections,
     mockGetScanProcessingStatus,
+    mockListScans,
 } = vi.hoisted(() => ({
     mockAnalyzeScanById: vi.fn(),
     mockCreateScan: vi.fn(),
     mockGetScanById: vi.fn(),
     mockGetScanDetections: vi.fn(),
     mockGetScanProcessingStatus: vi.fn(),
+    mockListScans: vi.fn(),
 }));
 
 vi.mock("../../src/services/processScan", () => ({
@@ -30,6 +32,7 @@ vi.mock("../../src/services/processScan", () => ({
     getScanById: mockGetScanById,
     getScanDetections: mockGetScanDetections,
     getScanProcessingStatus: mockGetScanProcessingStatus,
+    listScans: mockListScans,
 }));
 
 vi.mock("../../src/services/logger", () => ({
@@ -83,6 +86,38 @@ describe("scans routes", () => {
         mockGetScanById.mockReset();
         mockGetScanDetections.mockReset();
         mockGetScanProcessingStatus.mockReset();
+        mockListScans.mockReset();
+    });
+
+    it("lists scans for bootstrap", async () => {
+        mockListScans.mockResolvedValue({
+            scans: [
+                {
+                    id: "scan-1",
+                    room_name: "Lobby",
+                    started_at: "2026-01-01T10:00:00.000Z",
+                    ended_at: "2026-01-01T10:01:00.000Z",
+                    processing_status: "completed",
+                },
+            ],
+            limit: 10,
+            offset: 0,
+        });
+
+        const app = createApp();
+
+        const response = await request(app)
+            .get("/api/scans")
+            .query({ roomName: "Lobby", limit: 10, offset: 0 });
+
+        expect(response.status).toBe(200);
+        expect(response.body.success).toBe(true);
+        expect(response.body.data.scans).toHaveLength(1);
+        expect(mockListScans).toHaveBeenCalledWith({
+            roomName: "Lobby",
+            limit: 10,
+            offset: 0,
+        });
     });
 
     it("rejects invalid scan payload", async () => {
