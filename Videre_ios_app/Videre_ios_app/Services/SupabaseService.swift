@@ -924,6 +924,97 @@ final class APIService {
         persistMapGeoAnchorsToDefaults()
     }
 
+    private func normalizedOptionalText(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
+
+        return nil
+    }
+
+    private func resolveMapForManualNodeSave(
+            latitude: Double,
+            longitude: Double,
+            preferredMapId: String?
+    ) async throws -> NearbyMapCandidate? {
+        if let preferredMapId = normalizedOptionalText(preferredMapId) {
+            let maps = try await fetchMaps(limit: 100, offset: 0)
+            refreshMapAnchorRoomNames(using: maps)
+
+            if let preferredMap = maps.first(where: { $0.id == preferredMapId }) {
+                return NearbyMapCandidate(
+                    mapId: preferredMap.id,
+                    roomName: preferredMap.roomName,
+                    distanceMeters: distanceToKnownMapAnchor(
+                        mapId: preferredMap.id,
+                        latitude: latitude,
+                        longitude: longitude
+                    )
+                )
+            }
+
+            return NearbyMapCandidate(
+                mapId: preferredMapId,
+                roomName: mapGeoAnchorsByMapId[preferredMapId]?.roomName ?? "",
+                distanceMeters: distanceToKnownMapAnchor(
+                    mapId: preferredMapId,
+                    latitude: latitude,
+                    longitude: longitude
+                )
+            )
+        }
+
+        return try await fetchNearbyMapCandidates(
+            latitude: latitude,
+            longitude: longitude,
+            radiusMeters: 220,
+            limit: 1
+        ).first
+    }
+
+    private func projectCoordinateToMapPoint(
+            mapId: String,
+            roomName: String?,
+            latitude: Double,
+            longitude: Double
+    ) -> (x: Double, y: Double, z: Double) {
+        guard let anchor = mapGeoAnchorsByMapId[mapId] else {
+            upsertMapGeoAnchor(
+                mapId: mapId,
+                roomName: roomName,
+                latitude: latitude,
+                longitude: longitude
+            )
+            return (0, 0, 0)
+        }
+
+        let meanLatitudeRadians = ((anchor.latitude + latitude) * 0.5) * .pi / 180
+        let northMeters = (latitude - anchor.latitude) * 111_000.0
+        let eastMeters = (longitude - anchor.longitude) * 111_000.0 * cos(meanLatitudeRadians)
+
+        let headingRadians: Double
+        let metersPerUnit: Double
+        if let calibration = routeGeoCalibration,
+           calibration.mapId == mapId,
+           calibration.metersPerUnit > 0 {
+            headingRadians = calibration.headingRadians
+            metersPerUnit = calibration.metersPerUnit
+        } else {
+            headingRadians = 0
+            metersPerUnit = 1
+        }
+
+        let unitsNorth = northMeters / metersPerUnit
+        let unitsEast = eastMeters / metersPerUnit
+        let cosHeading = cos(headingRadians)
+        let sinHeading = sin(headingRadians)
+        let x = unitsNorth * cosHeading + unitsEast * sinHeading
+        let y = -unitsNorth * sinHeading + unitsEast * cosHeading
+
+        return (x, y, 0)
+    }
+
     private func refreshMapAnchorRoomNames(using maps: [ExistingMapRecord]) {
         var didMutate = false
 
@@ -1409,6 +1500,99 @@ final class APIService {
 
         cacheMapNodes(nodes: graph.nodes)
         return graph
+    }
+
+    func createMapNode(
+            mapId: String,
+            type: String = "path",
+            label: String,
+            x: Double,
+            y: Double,
+            z: Double,
+            autoConnect: Bool = true,
+            maxConnectionDistanceMeters: Double = 12
+    ) async throws -> String {
+        let payload: [String: Any] = [
+            "type": type,
+            "label": label,
+            "x": x,
+            "y": y,
+            "z": z,
+            "autoConnect": autoConnect,
+            "maxConnectionDistanceMeters": maxConnectionDistanceMeters,
+        ]
+
+        if Constants.apiDryRun {
+            print("POST \(apiBaseURL)/maps/\(mapId)/nodes")
+            print(Self.jsonBlock(payload))
+            return "dry-node-\(UUID().uuidString)"
+        }
+
+        let response = try await requestJSON(
+            path: "/maps/\(mapId)/nodes",
+            method: "POST",
+            payload: payload
+        )
+        let data = try extractApiData(response)
+
+        guard let nodeId = data["id"] as? String,
+              !nodeId.isEmpty
+        else {
+            throw NSError(
+                domain: "APIService",
+                code: 12,
+                userInfo: [NSLocalizedDescriptionKey: "Map node response missing id"]
+            )
+        }
+
+        return nodeId
+    }
+
+    func saveCurrentLocationAsNode(
+            label: String?,
+            latitude: Double,
+            longitude: Double,
+            preferredMapId: String? = nil
+    ) async throws -> (mapId: String, nodeId: String, nodeLabel: String, roomName: String?) {
+        let selectedMap = try await resolveMapForManualNodeSave(
+            latitude: latitude,
+            longitude: longitude,
+            preferredMapId: preferredMapId
+        )
+
+        guard let selectedMap else {
+            throw NSError(
+                domain: "APIService",
+                code: 13,
+                userInfo: [NSLocalizedDescriptionKey: "No map is available to save this node"]
+            )
+        }
+
+        let resolvedLabel = normalizedOptionalText(label) ?? "GPS node"
+        let projectedPoint = projectCoordinateToMapPoint(
+            mapId: selectedMap.mapId,
+            roomName: selectedMap.roomName,
+            latitude: latitude,
+            longitude: longitude
+        )
+
+        let nodeId = try await createMapNode(
+            mapId: selectedMap.mapId,
+            label: resolvedLabel,
+            x: projectedPoint.x,
+            y: projectedPoint.y,
+            z: projectedPoint.z
+        )
+
+        setActiveMapId(selectedMap.mapId)
+        _ = try await fetchMapGraph(mapId: selectedMap.mapId)
+
+        return (
+            mapId: selectedMap.mapId,
+            nodeId: nodeId,
+            nodeLabel: resolvedLabel,
+            roomName: normalizedOptionalText(selectedMap.roomName)
+        )
     }
 
     func createMapLandmark(

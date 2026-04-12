@@ -10,6 +10,7 @@ import {
   mapContributionsListQuerySchema,
   mapCreateBodySchema,
   mapCreateLandmarkBodySchema,
+  mapCreateNodeBodySchema,
   mapIdParamsSchema,
   mapLandmarkParamsSchema,
   mapListQuerySchema,
@@ -18,6 +19,7 @@ import {
   MapContributionsListQuery,
   MapCreateBody,
   MapCreateLandmarkBody,
+  MapCreateNodeBody,
   MapIdParams,
   MapLandmarkParams,
   MapListQuery,
@@ -26,6 +28,7 @@ import {
 import logger from "../src/services/logger";
 import {
   createMap,
+  createMapNode,
   createMapVersion,
   getMapById,
   getMapGraph,
@@ -144,6 +147,44 @@ router.get("/:id/graph", validateParams(mapIdParamsSchema), async (req: Request,
       .json(new ApiResponse(false, "Failed to fetch map graph"));
   }
 });
+
+router.post(
+  "/:id/nodes",
+  validateParams(mapIdParamsSchema),
+  validateBody(mapCreateNodeBodySchema),
+  async (req: Request, res: Response) => {
+    const { id: mapId } = req.params as MapIdParams;
+    const body = req.body as MapCreateNodeBody;
+
+    try {
+      const node = await createMapNode({
+        mapId,
+        type: body.type,
+        label: body.label,
+        x: body.x,
+        y: body.y,
+        z: body.z,
+        autoConnect: body.autoConnect,
+        maxConnectionDistanceMeters: body.maxConnectionDistanceMeters,
+      });
+
+      return res
+        .status(201)
+        .json(new ApiResponse(true, "Map node created", node));
+    } catch (error) {
+      if (error instanceof ProcessMapError) {
+        return res
+          .status(error.statusCode)
+          .json(new ApiResponse(false, error.message));
+      }
+
+      logger.error("Unexpected map node creation error for map %s: %o", mapId, error);
+      return res
+        .status(500)
+        .json(new ApiResponse(false, "Failed to create map node"));
+    }
+  },
+);
 
 router.post("/:id/version", validateParams(mapIdParamsSchema), async (req: Request, res: Response) => {
   const { id: mapId } = req.params as MapIdParams;

@@ -4,6 +4,7 @@ struct ScanView: View {
 
     @EnvironmentObject var scan:  ScanService
     @EnvironmentObject var lidar: LiDARService
+    @EnvironmentObject var navigationContext: NavigationContextService
 
     @StateObject private var roomSpeech = RoomNameSpeechController()
 
@@ -11,6 +12,9 @@ struct ScanView: View {
     @State private var landmarkType      = "door"
     @State private var landmarkLabel     = ""
     @State private var contributionNotes = ""
+    @State private var gpsNodeName       = ""
+    @State private var gpsNodeStatus     = ""
+    @State private var isSavingGpsNode   = false
 
     let landmarkTypes = ["door", "stairs", "elevator",
                          "toilet", "exit", "hazard", "other"]
@@ -25,6 +29,10 @@ struct ScanView: View {
     private var canStartScan: Bool {
         ScanDemoConfig.useHardcodedRoomName
             || !roomSpeech.roomName.isEmpty
+    }
+
+    private var canSaveGpsNode: Bool {
+        navigationContext.locationAuthorized && !isSavingGpsNode
     }
 
     var body: some View {
@@ -169,6 +177,76 @@ struct ScanView: View {
                                     .foregroundColor(.red)
                                     .padding(.horizontal, 20)
                             }
+                        }
+                    }
+
+                    VStack(alignment: .leading,
+                           spacing: 10) {
+
+                        Text("Save current point as node")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 20)
+
+                        TextField("Optional node name",
+                                  text: $gpsNodeName)
+                            .font(.system(size: 15))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(10)
+                            .padding(.horizontal, 20)
+
+                        Button {
+                            Task {
+                                await saveCurrentGpsNode()
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if isSavingGpsNode {
+                                    ProgressView()
+                                        .scaleEffect(0.85)
+                                } else {
+                                    Image(systemName:
+                                            "point.3.connected.trianglepath.dotted")
+                                        .font(.system(size: 15))
+                                }
+
+                                Text(isSavingGpsNode
+                                     ? "Saving node..."
+                                     : "Save GPS point as node")
+                                    .font(.system(
+                                        size: 15,
+                                        weight: .medium))
+                            }
+                            .foregroundColor(
+                                canSaveGpsNode ? .blue : .gray)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(
+                                (canSaveGpsNode
+                                 ? Color.blue
+                                 : Color.gray).opacity(0.1)
+                            )
+                            .cornerRadius(10)
+                        }
+                        .disabled(!canSaveGpsNode)
+                        .padding(.horizontal, 20)
+                        .accessibilityLabel(
+                            "Save current GPS point as node")
+
+                        if !navigationContext.locationAuthorized {
+                            Text("Location access is required before saving a GPS node.")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 20)
+                        }
+
+                        if !gpsNodeStatus.isEmpty {
+                            Text(gpsNodeStatus)
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 20)
                         }
                     }
 
@@ -547,6 +625,44 @@ struct ScanView: View {
             Text(text)
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
+        }
+    }
+
+    @MainActor
+    private func saveCurrentGpsNode() async {
+        guard navigationContext.locationAuthorized else {
+            gpsNodeStatus = "Location access is required before saving a GPS node."
+            VoiceService.shared.speak(
+                "Location access is required before saving a node.")
+            return
+        }
+
+        isSavingGpsNode = true
+        defer {
+            isSavingGpsNode = false
+        }
+
+        do {
+            let preferredMapId = APIService.shared.activeMapId
+                ?? (scan.backendMapId.isEmpty ? nil : scan.backendMapId)
+            let result = try await APIService.shared.saveCurrentLocationAsNode(
+                label: gpsNodeName,
+                latitude: navigationContext.latitude,
+                longitude: navigationContext.longitude,
+                preferredMapId: preferredMapId
+            )
+
+            gpsNodeStatus = {
+                if let roomName = result.roomName, !roomName.isEmpty {
+                    return "Saved \(result.nodeLabel) to \(roomName)."
+                }
+                return "Saved \(result.nodeLabel)."
+            }()
+            gpsNodeName = ""
+            VoiceService.shared.speak("Saved \(result.nodeLabel).")
+        } catch {
+            gpsNodeStatus = error.localizedDescription
+            VoiceService.shared.speak("Couldn't save the node.")
         }
     }
 }

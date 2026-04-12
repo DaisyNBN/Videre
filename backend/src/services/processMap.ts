@@ -45,6 +45,17 @@ type MapEdgeRow = {
     walkable: boolean;
 };
 
+type CreateMapNodeInput = {
+    mapId: string;
+    type?: string;
+    label?: string;
+    x: number;
+    y: number;
+    z: number;
+    autoConnect?: boolean;
+    maxConnectionDistanceMeters?: number;
+};
+
 type PostgrestLikeError = {
     code?: string;
     message?: string;
@@ -52,6 +63,8 @@ type PostgrestLikeError = {
 
 const POINT_DEDUPE_GRID_METERS = 0.35;
 const LANDMARK_DEDUPE_GRID_METERS = 0.75;
+const DEFAULT_MAX_NODE_CONNECTION_DISTANCE_METERS = 12;
+const VALID_MAP_NODE_TYPES = new Set(["path", "landmark", "start", "end"]);
 
 function isMissingSchemaError(error: PostgrestLikeError | null | undefined): boolean {
     if (!error) {
@@ -79,6 +92,27 @@ function asNumber(value: unknown, fallback = 0): number {
     }
 
     return fallback;
+}
+
+function normalizeMapNodeType(type: string | undefined): string {
+    if (type && VALID_MAP_NODE_TYPES.has(type)) {
+        return type;
+    }
+
+    return "path";
+}
+
+function sanitizeOptionalLabel(label: string | undefined): string | null {
+    const trimmed = label?.trim();
+    if (!trimmed) {
+        return null;
+    }
+
+    return trimmed;
+}
+
+function roundToHundredths(value: number): number {
+    return Math.round(value * 100) / 100;
 }
 
 function normalizePoints(value: unknown): ScanPoint[] {
@@ -646,6 +680,115 @@ export async function getMapGraph(mapId: string): Promise<{
         mapId,
         nodes: (nodes ?? []) as MapNodeRow[],
         edges: (edges ?? []) as MapEdgeRow[],
+    };
+}
+
+export async function createMapNode(input: CreateMapNodeInput): Promise<{
+    id: string;
+    mapId: string;
+    type: string;
+    label: string | null;
+    x: number;
+    y: number;
+    z: number;
+    connectedToNodeId: string | null;
+    connectedDistanceMeters: number | null;
+}> {
+    await getMapById(input.mapId);
+
+    const nodeId = randomUUID();
+    const resolvedType = normalizeMapNodeType(input.type);
+    const resolvedLabel = sanitizeOptionalLabel(input.label);
+    const shouldAutoConnect = input.autoConnect !== false;
+    const maxConnectionDistanceMeters =
+        typeof input.maxConnectionDistanceMeters === "number" &&
+            Number.isFinite(input.maxConnectionDistanceMeters) &&
+            input.maxConnectionDistanceMeters > 0
+            ? input.maxConnectionDistanceMeters
+            : DEFAULT_MAX_NODE_CONNECTION_DISTANCE_METERS;
+
+    let connectedToNodeId: string | null = null;
+    let connectedDistanceMeters: number | null = null;
+
+    if (shouldAutoConnect) {
+        const { data: existingNodes, error: existingNodesError } = await supabase
+            .from("map_nodes")
+            .select("id, x, y, z")
+            .eq("room_map_id", input.mapId);
+
+        if (existingNodesError) {
+            throw new ProcessMapError(500, "Failed to inspect existing map nodes");
+        }
+
+        const nearestNode = ((existingNodes ?? []) as Array<{
+            id: string;
+            x: number;
+            y: number;
+            z: number;
+        }>).reduce<{
+            id: string;
+            distance: number;
+        } | null>((closest, node) => {
+            const distance = Math.sqrt(
+                (node.x - input.x) ** 2 +
+                (node.y - input.y) ** 2 +
+                (node.z - input.z) ** 2,
+            );
+
+            if (!closest || distance < closest.distance) {
+                return {
+                    id: node.id,
+                    distance,
+                };
+            }
+
+            return closest;
+        }, null);
+
+        if (nearestNode && nearestNode.distance <= maxConnectionDistanceMeters) {
+            connectedToNodeId = nearestNode.id;
+            connectedDistanceMeters = roundToHundredths(nearestNode.distance);
+        }
+    }
+
+    const { error: insertNodeError } = await supabase.from("map_nodes").insert({
+        id: nodeId,
+        room_map_id: input.mapId,
+        type: resolvedType,
+        label: resolvedLabel,
+        x: input.x,
+        y: input.y,
+        z: input.z,
+    });
+
+    if (insertNodeError) {
+        throw new ProcessMapError(500, "Failed to create map node");
+    }
+
+    if (connectedToNodeId && connectedDistanceMeters !== null) {
+        const { error: insertEdgeError } = await supabase.from("map_edges").insert({
+            room_map_id: input.mapId,
+            from_node_id: connectedToNodeId,
+            to_node_id: nodeId,
+            distance: connectedDistanceMeters,
+            walkable: true,
+        });
+
+        if (insertEdgeError) {
+            throw new ProcessMapError(500, "Failed to connect map node to graph");
+        }
+    }
+
+    return {
+        id: nodeId,
+        mapId: input.mapId,
+        type: resolvedType,
+        label: resolvedLabel,
+        x: input.x,
+        y: input.y,
+        z: input.z,
+        connectedToNodeId,
+        connectedDistanceMeters,
     };
 }
 

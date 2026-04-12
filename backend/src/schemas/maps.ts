@@ -10,6 +10,8 @@ const landmarkTypeSchema = z.enum([
     "unknown",
 ]);
 
+const mapNodeTypeSchema = z.enum(["path", "landmark", "start", "end"]);
+
 const vector3Schema = z.object({
     x: z.number().finite(),
     y: z.number().finite(),
@@ -66,6 +68,16 @@ export const mapCreateLandmarkBodySchema = z.object({
     confidence: z.number().finite().min(0).max(1).optional(),
 });
 
+export const mapCreateNodeBodySchema = z.object({
+    type: mapNodeTypeSchema.optional(),
+    label: z.string().optional(),
+    x: z.number().finite(),
+    y: z.number().finite(),
+    z: z.number().finite(),
+    autoConnect: z.boolean().optional(),
+    maxConnectionDistanceMeters: z.number().finite().positive().optional(),
+});
+
 export const mapUpdateLandmarkBodySchema = z.object({
     type: landmarkTypeSchema.optional(),
     label: z.string().optional(),
@@ -97,6 +109,7 @@ export type MapLandmarkParams = z.infer<typeof mapLandmarkParamsSchema>;
 export type MapCreateBody = z.infer<typeof mapCreateBodySchema>;
 export type MapListQuery = z.infer<typeof mapListQuerySchema>;
 export type MapCreateLandmarkBody = z.infer<typeof mapCreateLandmarkBodySchema>;
+export type MapCreateNodeBody = z.infer<typeof mapCreateNodeBodySchema>;
 export type MapUpdateLandmarkBody = z.infer<typeof mapUpdateLandmarkBodySchema>;
 export type MapContributionsCreateBody = z.infer<typeof mapContributionsCreateBodySchema>;
 export type MapContributionsListQuery = z.infer<typeof mapContributionsListQuerySchema>;

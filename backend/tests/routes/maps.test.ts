@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
     mockCreateMap,
+    mockCreateMapNode,
     mockCreateMapVersion,
     mockGetMapById,
     mockGetMapGraph,
@@ -17,6 +18,7 @@ const {
     mockListMapContributions,
 } = vi.hoisted(() => ({
     mockCreateMap: vi.fn(),
+    mockCreateMapNode: vi.fn(),
     mockCreateMapVersion: vi.fn(),
     mockGetMapById: vi.fn(),
     mockGetMapGraph: vi.fn(),
@@ -40,6 +42,7 @@ vi.mock("../../src/services/processMap", () => ({
         }
     },
     createMap: mockCreateMap,
+    createMapNode: mockCreateMapNode,
     createMapVersion: mockCreateMapVersion,
     getMapById: mockGetMapById,
     getMapGraph: mockGetMapGraph,
@@ -95,6 +98,7 @@ function createApp() {
 describe("maps routes", () => {
     beforeEach(() => {
         mockCreateMap.mockReset();
+        mockCreateMapNode.mockReset();
         mockCreateMapVersion.mockReset();
         mockGetMapById.mockReset();
         mockGetMapGraph.mockReset();
@@ -178,6 +182,46 @@ describe("maps routes", () => {
         expect(response.status).toBe(201);
         expect(response.body.success).toBe(true);
         expect(response.body.data.id).toBe("map-2");
+    });
+
+    it("creates a map node and forwards connection settings", async () => {
+        mockCreateMapNode.mockResolvedValue({
+            id: "node-1",
+            mapId: "map-1",
+            type: "path",
+            label: "North entrance",
+            x: 1.25,
+            y: 3.5,
+            z: 0,
+            connectedToNodeId: "node-0",
+            connectedDistanceMeters: 2.8,
+        });
+
+        const app = createApp();
+
+        const response = await request(app).post("/api/maps/map-1/nodes").send({
+            type: "path",
+            label: "North entrance",
+            x: 1.25,
+            y: 3.5,
+            z: 0,
+            autoConnect: true,
+            maxConnectionDistanceMeters: 9,
+        });
+
+        expect(response.status).toBe(201);
+        expect(response.body.success).toBe(true);
+        expect(response.body.data.id).toBe("node-1");
+        expect(mockCreateMapNode).toHaveBeenCalledWith({
+            mapId: "map-1",
+            type: "path",
+            label: "North entrance",
+            x: 1.25,
+            y: 3.5,
+            z: 0,
+            autoConnect: true,
+            maxConnectionDistanceMeters: 9,
+        });
     });
 
     it("lists map contributions with validated query", async () => {
