@@ -54,8 +54,8 @@ class ScanService: NSObject, ObservableObject {
     private let meshLandmarkInterval: TimeInterval = 2.0
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
-    /// Rotation threshold to trigger new keyframe: 90 degrees.
-    private let rotationThresholdDegrees: Float = 90.0
+    /// Rotation threshold to trigger new keyframe: 180 degrees (face opposite direction).
+    private let rotationThresholdDegrees: Float = 180.0
     /// Position change threshold: 0.5 meters.
     private let positionChangeThreshold: Float = 0.5
     /// LiDAR distance threshold to trigger new keyframe: significant depth change.
@@ -210,16 +210,8 @@ class ScanService: NSObject, ObservableObject {
             return true
         }
 
-        // Check rotation change (90 degrees threshold)
-        let rotationDiff = rotationAngleDifference(
-            lastKeyframeRotation,
-            newRotation)
-        if rotationDiff >= rotationThresholdDegrees {
-            print("New keyframe: rotation changed by \(rotationDiff)°")
-            return true
-        }
-
         // Check position change (0.5 meters threshold)
+        // Trigger on new location
         let positionDiff = simd_distance(
             lastKeyframePosition,
             newPosition)
@@ -228,14 +220,14 @@ class ScanService: NSObject, ObservableObject {
             return true
         }
 
-        // Check LiDAR distance change (0.3 meters / 30cm threshold)
-        // Only check if both distances are valid
-        if newLidarDistance < 999.0 && lastKeyframeLidarDistance < 999.0 {
-            let lidarDiff = abs(newLidarDistance - lastKeyframeLidarDistance)
-            if lidarDiff >= lidarDistanceThreshold {
-                print("New keyframe: LiDAR depth changed by \(lidarDiff)m")
-                return true
-            }
+        // Check rotation change (180 degrees threshold)
+        // Trigger when facing opposite direction for interior mapping
+        let rotationDiff = rotationAngleDifference(
+            lastKeyframeRotation,
+            newRotation)
+        if rotationDiff >= rotationThresholdDegrees {
+            print("New keyframe: rotation changed by \(rotationDiff)°")
+            return true
         }
 
         // Check time-based fallback (every 5 seconds at most)
