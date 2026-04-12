@@ -3,7 +3,6 @@ import { NavRequest, NavResponse } from "../types";
 import { supabase } from "./supabase";
 import { haversineMeters } from "../utils/distance";
 import { getNearbyHazards } from "./processHazard";
-import { analyzeImageWithGeminiVision } from "./geminiVision";
 import logger from "./logger";
 
 export class NavigationError extends Error {
@@ -155,24 +154,6 @@ function normalizeHeadingDegrees(value: unknown): number | undefined {
   return normalized;
 }
 
-function relativeDirectionFromDelta(delta: number): string {
-  const absDelta = Math.abs(delta);
-  if (absDelta <= 20) {
-    return "ahead";
-  }
-  if (absDelta <= 70) {
-    return delta > 0 ? "ahead-right" : "ahead-left";
-  }
-  if (absDelta <= 120) {
-    return delta > 0 ? "right" : "left";
-  }
-  if (absDelta <= 160) {
-    return delta > 0 ? "behind-right" : "behind-left";
-  }
-
-  return "behind";
-}
-
 async function loadRouteCheckpoints(routeId: string): Promise<RouteCheckpointRow[]> {
   const now = Date.now();
   const cached = routeCheckpointCache.get(routeId);
@@ -269,17 +250,6 @@ export type RerouteResult = GeneratedRoute & {
   reason: string | null;
 };
 
-export type VisionLocalizationFrame = {
-  imageBase64: string;
-  yawDegrees?: number;
-  headingDegrees?: number;
-  capturedAtMs?: number;
-};
-
-export type VisionNavigationRequest = NavRequest & {
-  frames: VisionLocalizationFrame[];
-};
-
 type ResolvedRouteNodes = {
   startNodeId: string;
   endNodeId: string;
@@ -296,17 +266,6 @@ type DestinationLandmarkRow = {
   x: number;
   y: number;
   z: number;
-};
-
-type NearbyLandmarkRow = {
-  label: string | null;
-  type: string;
-  status: string | null;
-  confidence: number | null;
-  x: number;
-  y: number;
-  z: number;
-  heading_degrees: number | null;
 };
 
 function isUndefinedTableOrColumn(error: PostgrestLikeError | null | undefined): boolean {
@@ -601,100 +560,6 @@ async function getCheckpointContext(
   };
 }
 
-async function resolveNearbyLandmarkCue(
-  mapId: string,
-  mapPosition: { x: number; y: number; z?: number },
-  headingDegrees?: number,
-): Promise<string | undefined> {
-  const { data, error } = await supabase
-    .from("landmarks")
-    .select("label, type, status, confidence, x, y, z, heading_degrees")
-    .eq("room_map_id", mapId)
-    .limit(48);
-
-  if (error) {
-    if (!isUndefinedTableOrColumn(error)) {
-      logger.warn("Unable to fetch nearby landmarks for directional cue: %o", error);
-    }
-    return undefined;
-  }
-
-  const normalizedHeading = normalizeHeadingDegrees(headingDegrees);
-  const candidates = ((data ?? []) as NearbyLandmarkRow[])
-    .filter((landmark) => {
-      if (landmark.status === "rejected") {
-        return false;
-      }
-      return typeof landmark.label === "string" && landmark.label.trim().length > 0;
-    })
-    .map((landmark) => {
-      const dx = landmark.x - mapPosition.x;
-      const dy = landmark.y - mapPosition.y;
-      const dz = typeof mapPosition.z === "number" ? landmark.z - mapPosition.z : 0;
-      const distance = Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
-      const bearing = bearingDegreesFromMapVector(
-        mapPosition.x,
-        mapPosition.y,
-        landmark.x,
-        landmark.y,
-      );
-      const relativeDelta =
-        typeof bearing === "number" && typeof normalizedHeading === "number"
-          ? clampHeadingDelta(bearing - normalizedHeading)
-          : undefined;
-
-      let score = Math.max(0, 6 - distance);
-      if (landmark.status === "verified") {
-        score += 2;
-      }
-      if (typeof landmark.confidence === "number" && Number.isFinite(landmark.confidence)) {
-        score += Math.max(0, Math.min(landmark.confidence, 1));
-      }
-
-      return {
-        landmark,
-        distance,
-        relativeDelta,
-        score,
-      };
-    })
-    .filter((entry) => entry.distance <= 4)
-    .sort((lhs, rhs) => {
-      if (lhs.score !== rhs.score) {
-        return rhs.score - lhs.score;
-      }
-      return lhs.distance - rhs.distance;
-    });
-
-  const best = candidates[0];
-  if (!best) {
-    return undefined;
-  }
-
-  const label = (best.landmark.label ?? "landmark").trim();
-  const directionPhrase =
-    typeof best.relativeDelta === "number"
-      ? `on your ${relativeDirectionFromDelta(best.relativeDelta)}`
-      : "nearby";
-
-  const landmarkHeading = normalizeHeadingDegrees(best.landmark.heading_degrees);
-  let facingPhrase = "";
-  if (typeof landmarkHeading === "number" && typeof normalizedHeading === "number") {
-    const facingDelta = clampHeadingDelta(landmarkHeading - normalizedHeading);
-    const absFacingDelta = Math.abs(facingDelta);
-
-    if (absFacingDelta <= 30) {
-      facingPhrase = ", facing your direction";
-    } else if (absFacingDelta >= 150) {
-      facingPhrase = ", facing away";
-    } else {
-      facingPhrase = facingDelta > 0 ? ", angled right" : ", angled left";
-    }
-  }
-
-  return `${label} ${directionPhrase}${facingPhrase}.`;
-}
-
 function toCheckpointSummary(
   checkpointContext?: CheckpointContext,
 ): { label: string; distance: number } | undefined {
@@ -711,7 +576,6 @@ function toCheckpointSummary(
 function buildDeterministicRouteResponse(
   request: NavRequest,
   checkpointContext?: CheckpointContext,
-  nearbyLandmarkCue?: string,
 ): NavResponse {
   const movementSpeedMps = resolveMovementSpeedMps(request);
   const thresholds = resolveAdaptiveTurnThresholds(movementSpeedMps);
@@ -735,9 +599,8 @@ function buildDeterministicRouteResponse(
   );
   if (nearbyObstacle) {
     const avoidDir = nearbyObstacle.position === "left" ? "right" : "left";
-    const landmarkSuffix = nearbyLandmarkCue ? ` ${nearbyLandmarkCue}` : "";
     return {
-      instruction: `${nearbyObstacle.label} on your ${nearbyObstacle.position}. Keep ${avoidDir}.${landmarkSuffix}`,
+      instruction: `${nearbyObstacle.label} on your ${nearbyObstacle.position}. Keep ${avoidDir}.`,
       urgency: "medium",
       haptic_pattern: "double_tap",
       next_checkpoint: checkpointSummary?.label ?? null,
@@ -747,9 +610,8 @@ function buildDeterministicRouteResponse(
   }
 
   if (!checkpointContext) {
-    const landmarkSuffix = nearbyLandmarkCue ? ` ${nearbyLandmarkCue}` : "";
     return {
-      instruction: `Continue straight. Path is clear.${landmarkSuffix}`,
+      instruction: "Continue straight.",
       urgency: "low",
       haptic_pattern: "single_tap",
       next_checkpoint: null,
@@ -783,18 +645,29 @@ function buildDeterministicRouteResponse(
     }
   }
 
-  const roundedDistance = Math.max(0, Math.round(checkpointContext.target.distance));
-  const instruction =
-    roundedDistance <= 1
-      ? `${turnPrompt}. You are at ${checkpointContext.target.label}.`
-      : `${turnPrompt}. ${checkpointContext.target.label} in about ${roundedDistance} meters.`;
+  const remainingDistance = checkpointContext.target.distance;
+  const roundedDistance = Math.max(0, Math.round(remainingDistance));
+  const absHeadingDelta = typeof checkpointContext.headingDeltaDegrees === "number"
+    ? Math.abs(checkpointContext.headingDeltaDegrees)
+    : undefined;
 
-  const instructionWithCue = nearbyLandmarkCue
-    ? `${instruction} ${nearbyLandmarkCue}`
-    : instruction;
+  let instruction: string;
+  if (remainingDistance <= 2.2) {
+    const sideCue =
+      typeof checkpointContext.headingDeltaDegrees === "number"
+        ? absHeadingDelta !== undefined && absHeadingDelta <= 25
+          ? "ahead"
+          : checkpointContext.headingDeltaDegrees > 0
+            ? "on your right"
+            : "on your left"
+        : "nearby";
+    instruction = `${turnPrompt}. ${checkpointContext.target.label} should be ${sideCue}.`;
+  } else {
+    instruction = `${turnPrompt}. Continue about ${roundedDistance} meters toward ${checkpointContext.target.label}.`;
+  }
 
   return {
-    instruction: instructionWithCue,
+    instruction,
     urgency,
     haptic_pattern: hapticPattern,
     next_checkpoint: checkpointContext.target.label,
@@ -847,44 +720,6 @@ function scoreLabelMatch(
   }
 
   return 0;
-}
-
-function dedupeVisionFrames(frames: VisionLocalizationFrame[]): VisionLocalizationFrame[] {
-  const seen = new Set<string>();
-  const deduped: VisionLocalizationFrame[] = [];
-
-  for (const frame of frames) {
-    const key = frame.imageBase64.trim();
-    if (!key || seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    deduped.push(frame);
-  }
-
-  return deduped.slice(0, 2);
-}
-
-function buildVisionLandmarkCueFromMatches(matches: Array<{
-  label: string;
-  distance: number;
-  relativeDelta?: number;
-}>): string | undefined {
-  if (matches.length === 0) {
-    return undefined;
-  }
-
-  const phrases = matches.slice(0, 2).map((match) => {
-    const direction =
-      typeof match.relativeDelta === "number"
-        ? `on your ${relativeDirectionFromDelta(match.relativeDelta)}`
-        : "nearby";
-
-    return `${match.label} ${direction}`;
-  });
-
-  return `Visual check: ${phrases.join(" and ")}.`;
 }
 
 function resolveNearestNodeFromPoint(
@@ -1323,156 +1158,6 @@ export async function rerouteNavigation(
   };
 }
 
-export async function getVisionNavigationInstruction(
-  request: VisionNavigationRequest,
-): Promise<NavResponse> {
-  if (!request.map_id || !request.map_position) {
-    throw new NavigationError(400, "map_id and map_position are required for vision localization");
-  }
-
-  const frames = dedupeVisionFrames(request.frames);
-  if (frames.length === 0) {
-    throw new NavigationError(400, "At least one non-empty vision frame is required");
-  }
-
-  const movementSpeedMps = resolveMovementSpeedMps(request);
-  const adaptiveThresholds = resolveAdaptiveTurnThresholds(movementSpeedMps);
-  const checkpointContext = request.route_id
-    ? await getCheckpointContext(
-      request.route_id,
-      request.location,
-      request.map_position,
-      request.heading_degrees,
-      adaptiveThresholds.checkpointAdvanceDistanceM,
-    )
-    : undefined;
-
-  const analyses = await Promise.all(
-    frames.map((frame) => analyzeImageWithGeminiVision(frame.imageBase64)),
-  );
-
-  const observed = analyses.flatMap((analysis, index) => {
-    const frame = frames[index];
-    const frameHeading = normalizeHeadingDegrees(frame.headingDegrees)
-      ?? normalizeHeadingDegrees(frame.yawDegrees)
-      ?? normalizeHeadingDegrees(request.heading_degrees);
-
-    return analysis.landmarks.map((landmark) => ({
-      label: landmark.label,
-      type: landmark.type,
-      confidence: landmark.confidence,
-      frameHeading,
-    }));
-  });
-
-  const { data, error } = await supabase
-    .from("landmarks")
-    .select("label, type, status, confidence, x, y, z, heading_degrees")
-    .eq("room_map_id", request.map_id)
-    .limit(96);
-
-  if (error && !isUndefinedTableOrColumn(error)) {
-    logger.warn("Unable to fetch map landmarks for vision localization: %o", error);
-  }
-
-  const mapPosition = request.map_position;
-  const nearbyLandmarks = ((data ?? []) as NearbyLandmarkRow[])
-    .filter((landmark) => landmark.status !== "rejected")
-    .map((landmark) => {
-      const dx = landmark.x - mapPosition.x;
-      const dy = landmark.y - mapPosition.y;
-      const dz = typeof mapPosition.z === "number" ? landmark.z - mapPosition.z : 0;
-      const distance = Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
-      return { landmark, distance };
-    })
-    .filter((entry) => entry.distance <= 6);
-
-  const rankedMatches = observed.flatMap((observation) => {
-    const normalizedObservedLabel = normalizeText(observation.label ?? observation.type ?? "");
-
-    return nearbyLandmarks.flatMap((candidate) => {
-      const candidateLabel = normalizeText(candidate.landmark.label ?? "");
-      const typeMatches = normalizeText(candidate.landmark.type) === normalizeText(observation.type);
-      const labelScore = candidateLabel
-        ? scoreLabelMatch(candidateLabel, normalizedObservedLabel)
-        : 0;
-      const roughMatch = candidateLabel
-        ? labelsRoughlyMatch(candidateLabel, normalizedObservedLabel)
-        : false;
-
-      if (!typeMatches && !roughMatch && labelScore === 0) {
-        return [];
-      }
-
-      let score = labelScore;
-      if (typeMatches) {
-        score += 18;
-      }
-      score += Math.max(0, 8 - candidate.distance);
-      score += Math.max(0, Math.min(observation.confidence ?? 0, 1)) * 10;
-      if (candidate.landmark.status === "verified") {
-        score += 6;
-      }
-      if (typeof candidate.landmark.confidence === "number") {
-        score += Math.max(0, Math.min(candidate.landmark.confidence, 1)) * 5;
-      }
-
-      const bearing = bearingDegreesFromMapVector(
-        mapPosition.x,
-        mapPosition.y,
-        candidate.landmark.x,
-        candidate.landmark.y,
-      );
-      const relativeDelta =
-        typeof bearing === "number" && typeof observation.frameHeading === "number"
-          ? clampHeadingDelta(bearing - observation.frameHeading)
-          : typeof bearing === "number" && typeof request.heading_degrees === "number"
-            ? clampHeadingDelta(bearing - request.heading_degrees)
-            : undefined;
-
-      return [{
-        label: candidate.landmark.label ?? candidate.landmark.type,
-        distance: candidate.distance,
-        relativeDelta,
-        score,
-      }];
-    });
-  });
-
-  const bestMatches = rankedMatches
-    .sort((lhs, rhs) => rhs.score - lhs.score)
-    .filter((match, index, all) => {
-      return all.findIndex((candidate) => candidate.label === match.label) === index;
-    })
-    .slice(0, 2);
-
-  const nearbyLandmarkCue = buildVisionLandmarkCueFromMatches(bestMatches)
-    ?? await resolveNearbyLandmarkCue(
-      request.map_id,
-      request.map_position,
-      request.heading_degrees,
-    );
-
-  const response = buildDeterministicRouteResponse(
-    request,
-    checkpointContext,
-    nearbyLandmarkCue,
-  );
-
-  if (bestMatches.length === 0) {
-    response.fallback_used = true;
-    response.urgency = response.urgency === "high" ? "high" : "medium";
-    if (response.haptic_pattern === "none" || response.haptic_pattern === "single_tap") {
-      response.haptic_pattern = "double_tap";
-    }
-    response.instruction = checkpointContext
-      ? `Visual check inconclusive. ${response.instruction}`
-      : "Visual check inconclusive. Slow down and point toward a doorway or sign.";
-  }
-
-  return response;
-}
-
 export async function getNavigationInstruction(
   request: NavRequest
 ): Promise<NavResponse> {
@@ -1489,19 +1174,9 @@ export async function getNavigationInstruction(
     )
     : undefined;
 
-  const nearbyLandmarkCue =
-    request.map_id && request.map_position
-      ? await resolveNearbyLandmarkCue(
-        request.map_id,
-        request.map_position,
-        request.heading_degrees,
-      )
-      : undefined;
-
   const response: NavResponse = buildDeterministicRouteResponse(
     request,
     checkpointContext,
-    nearbyLandmarkCue,
   );
 
   const hazards = await getNearbyHazards(

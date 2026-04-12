@@ -17,13 +17,6 @@ const coordinateSchema = z.object({
     z: z.number().finite().optional(),
 });
 
-const visionLocalizationFrameSchema = z.object({
-    imageBase64: z.string().min(1),
-    yawDegrees: z.number().finite().optional(),
-    headingDegrees: z.number().finite().optional(),
-    capturedAtMs: z.number().finite().optional(),
-});
-
 export const navigationInstructionBodySchema = z.object({
     route_id: z.string().optional(),
     routeId: z.string().optional(),
@@ -66,23 +59,6 @@ export const navigationRerouteBodySchema = navigationRouteBodySchema.extend({
     reason: z.string().optional(),
 });
 
-export const navigationVisionLocalizationBodySchema = z.object({
-    route_id: z.string().optional(),
-    routeId: z.string().optional(),
-    map_id: z.string().optional(),
-    mapId: z.string().optional(),
-    location: locationSchema,
-    map_position: coordinateSchema.optional(),
-    mapPosition: coordinateSchema.optional(),
-    heading_degrees: z.number().finite().optional(),
-    headingDegrees: z.number().finite().optional(),
-    obstacles: z.array(obstacleSchema).optional().default([]),
-    speed: z.enum(["walking", "stopped"]).optional().default("walking"),
-    speed_mps: z.number().finite().nonnegative().optional(),
-    speedMps: z.number().finite().nonnegative().optional(),
-    frames: z.array(visionLocalizationFrameSchema).min(1).max(2),
-});
-
 export type NavigationInstructionBody = z.infer<typeof navigationInstructionBodySchema>;
 export type NavigationRouteBody = z.infer<typeof navigationRouteBodySchema>;
 export type NavigationRouteFromCoordinatesBody =
@@ -90,5 +66,3 @@ export type NavigationRouteFromCoordinatesBody =
 export type NavigationRouteToRoomBody =
     z.infer<typeof navigationRouteToRoomBodySchema>;
 export type NavigationRerouteBody = z.infer<typeof navigationRerouteBodySchema>;
-export type NavigationVisionLocalizationBody =
-    z.infer<typeof navigationVisionLocalizationBodySchema>;

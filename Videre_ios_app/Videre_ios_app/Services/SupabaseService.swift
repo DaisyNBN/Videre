@@ -1982,34 +1982,6 @@ final class APIService {
         )
     }
 
-    func postVisionLocalization(_ payload: [String: Any]) async throws -> NavigationInstructionResponse {
-        let urlStr = "\(apiBaseURL)/navigate/vision-localize"
-        if Constants.apiDryRun {
-            print("POST \(urlStr)")
-            print(Self.jsonBlock(payload))
-            return NavigationInstructionResponse(
-                instruction: "Visual check: doorway ahead-left. Continue slightly right.",
-                urgency: "medium",
-                hapticPattern: "double_tap",
-                nextCheckpoint: nil,
-                distanceToNextM: nil,
-                fallbackUsed: false
-            )
-        }
-
-        let response = try await requestJSON(path: "/navigate/vision-localize", method: "POST", payload: payload)
-        let data = try extractApiData(response)
-
-        return NavigationInstructionResponse(
-            instruction: data["instruction"] as? String ?? "Visual check inconclusive.",
-            urgency: data["urgency"] as? String ?? "medium",
-            hapticPattern: data["haptic_pattern"] as? String ?? "double_tap",
-            nextCheckpoint: data["next_checkpoint"] as? String,
-            distanceToNextM: numberAsDouble(data["distance_to_next_m"]),
-            fallbackUsed: data["fallback_used"] as? Bool ?? false
-        )
-    }
-
     // ── Realtime subscription (polling) ───────────────
     // polls for new hazards every N seconds
     // Uses polling for simplicity.
