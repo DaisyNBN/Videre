@@ -5,7 +5,7 @@ import supabase from "../src/services/supabase";
 import logger from "../src/services/logger";
 import { analyzeImageWithGemini } from "../src/services/gemini";
 
-const router = require('express').Router();
+const router = require("express").Router();
 
 type AnalyzeScanResult = {
     id: string;
