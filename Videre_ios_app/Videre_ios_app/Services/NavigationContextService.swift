@@ -40,12 +40,15 @@ final class NavigationContextService: NSObject, ObservableObject {
     private var lastCompassHeadingUpdateAt: Date = .distantPast
     private var walkCoordinateTrail: [WalkCoordinateSample] = []
     private var lastWalkCoordinateSampleAt: Date = .distantPast
-    private let walkCoordinateSampleInterval: TimeInterval = 1.2
+    private let walkCoordinateSampleInterval: TimeInterval = 0.6
 
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        manager.distanceFilter = 1
+        manager.activityType = .fitness
+        manager.pausesLocationUpdatesAutomatically = false
         if CLLocationManager.headingAvailable() {
             manager.headingFilter = 5
         }

@@ -50,6 +50,7 @@ struct ContentView: View {
     @State private var lastGuidanceFailureSpeechAt: Date = .distantPast
     @State private var localizationStatusMessage: String = ""
     @State private var localizationWarningActive: Bool = false
+    @State private var localizationGraceUntil: Date = .distantPast
     @State private var lastLocalizationWarningSpokenAt: Date = .distantPast
     private let autoGuidanceTimer = Timer.publish(every: 1.2, on: .main, in: .common).autoconnect()
     private let guidanceThrottleInterval: TimeInterval = 0.9
@@ -60,6 +61,8 @@ struct ContentView: View {
     private let localizationWarningDistanceThreshold: Double = 2.8
     private let localizationRecoveryDistanceThreshold: Double = 1.8
     private let localizationWarningSpeechCooldown: TimeInterval = 8.0
+    private let localizationStartupGraceWindow: TimeInterval = 6.0
+    private let localizationHardHoldDistanceDuringGrace: Double = 5.0
 
     init(openScan: @escaping () -> Void = {}) {
         self.openScan = openScan
@@ -675,6 +678,9 @@ struct ContentView: View {
             loadRecentDestinations()
             bootstrapExistingNavigationData()
             refreshDestinationSuggestions()
+            if APIService.shared.activeRouteId != nil {
+                localizationGraceUntil = Date().addingTimeInterval(localizationStartupGraceWindow)
+            }
         }
         .onChange(of: scan.backendMapId) { _ in
             refreshDestinationSuggestions()
@@ -774,6 +780,7 @@ struct ContentView: View {
                     destinationRouteStatus = "Route to \(destination) ready: \(routeId)"
                     appState.walkState = .walking
                     autoGuidanceEnabled = true
+                    localizationGraceUntil = Date().addingTimeInterval(localizationStartupGraceWindow)
                     isDestinationRouteInFlight = false
                     selectedSuggestionMapId = mapId
                     rememberRecentDestination(destination)
@@ -1223,6 +1230,13 @@ struct ContentView: View {
 
     private func shouldHoldGuidanceForLocalization(_ status: RouteLocalizationStatus) -> Bool {
         guard status.active else {
+            return false
+        }
+
+        if Date() < localizationGraceUntil {
+            if let distance = status.nearestNodeDistanceM {
+                return distance > localizationHardHoldDistanceDuringGrace
+            }
             return false
         }
 

@@ -81,8 +81,15 @@ type AIDetectionRow = {
 type ScanListRow = {
   id: string;
   room_name: string;
-  started_at: string;
-  ended_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  processing_status: string | null;
+};
+
+type ScanListFallbackRow = {
+  id: string;
+  room_name: string;
+  created_at: string;
   processing_status: string | null;
 };
 
@@ -837,6 +844,42 @@ export async function listScans(filters: {
   const { data, error } = await query;
 
   if (error) {
+    if (isUndefinedColumnError(error)) {
+      logger.info(
+        "scans.started_at/ended_at are unavailable; falling back to created_at ordering.",
+      );
+
+      let fallbackQuery = supabase
+        .from("scans")
+        .select("id, room_name, created_at, processing_status")
+        .order("created_at", { ascending: false })
+        .range(safeOffset, safeOffset + safeLimit - 1);
+
+      if (typeof filters.roomName === "string" && filters.roomName.trim().length > 0) {
+        fallbackQuery = fallbackQuery.ilike("room_name", `%${filters.roomName.trim()}%`);
+      }
+
+      const { data: fallbackData, error: fallbackError } = await fallbackQuery;
+      if (fallbackError) {
+        logger.error("Error fetching scans list from database (created_at fallback): %o", fallbackError);
+        throw new ProcessScanError(500, "Failed to list scans");
+      }
+
+      const scans = ((fallbackData ?? []) as ScanListFallbackRow[]).map((row) => ({
+        id: row.id,
+        room_name: row.room_name,
+        started_at: row.created_at,
+        ended_at: row.created_at,
+        processing_status: row.processing_status,
+      }));
+
+      return {
+        scans,
+        limit: safeLimit,
+        offset: safeOffset,
+      };
+    }
+
     logger.error("Error fetching scans list from database: %o", error);
     throw new ProcessScanError(500, "Failed to list scans");
   }

@@ -48,11 +48,11 @@ class ScanService: NSObject, ObservableObject {
     private var lastMeshLandmarkTime: TimeInterval = 0
 
     /// Camera pose samples for trajectory (1 Hz - one per second).
-    let POINT_INTERVAL:    TimeInterval = 1.0
+    let POINT_INTERVAL:    TimeInterval = 0.35
     /// Keyframes only when environment rotates significantly or every max interval.
     let KEYFRAME_INTERVAL: TimeInterval = 5.0
-    let DEPTH_INTERVAL:    TimeInterval = 1.0
-    private let meshLandmarkInterval: TimeInterval = 2.0
+    let DEPTH_INTERVAL:    TimeInterval = 0.45
+    private let meshLandmarkInterval: TimeInterval = 1.0
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
     /// Position change threshold: 3.0 meters (only capture when user walks much further).
@@ -66,6 +66,8 @@ class ScanService: NSObject, ObservableObject {
     // ── Current camera position & rotation tracking ──────────
     // used for adding landmarks
     private(set) var currentPosition: simd_float3 = .zero
+    private var hasSmoothedPosition = false
+    private let positionSmoothingAlpha: Float = 0.35
     private var lastKeyframePosition: simd_float3 = .zero
     private var lastKeyframeCacheClearTime: Date = Date()
     private let locationManager = CLLocationManager()
@@ -75,8 +77,10 @@ class ScanService: NSObject, ObservableObject {
     override init() {
         super.init()
         locationManager.delegate = self
-        locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
-        locationManager.distanceFilter = 3
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        locationManager.distanceFilter = 1
+        locationManager.activityType = .fitness
+        locationManager.pausesLocationUpdatesAutomatically = false
     }
 
     // ── Start ─────────────────────────────────────────
@@ -106,6 +110,8 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframeTime       = 0
         lastDepthTime          = 0
         lastMeshLandmarkTime   = 0
+        hasSmoothedPosition    = false
+        currentPosition        = .zero
         lastKeyframePosition   = .zero
         lastKeyframeCacheClearTime = Date()
         isScanning          = true
@@ -156,11 +162,18 @@ class ScanService: NSObject, ObservableObject {
         guard isScanning else { return }
 
         let t   = frame.camera.transform
-        currentPosition = simd_float3(
+        let rawPosition = simd_float3(
             t.columns.3.x,
             t.columns.3.y,
             t.columns.3.z
         )
+
+        if !hasSmoothedPosition {
+            currentPosition = rawPosition
+            hasSmoothedPosition = true
+        } else {
+            currentPosition = currentPosition + (positionSmoothingAlpha * (rawPosition - currentPosition))
+        }
 
         let now = frame.timestamp
 
@@ -321,11 +334,10 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Collect trajectory point (continuous LiDAR locations) ──
     private func addPoint(frame: ARFrame) {
-        let t = frame.camera.transform
         let p = TrajectoryPoint(
-            x:             t.columns.3.x,
-            y:             t.columns.3.y,
-            z:             t.columns.3.z,
+            x:             currentPosition.x,
+            y:             currentPosition.y,
+            z:             currentPosition.z,
             timestamp:     currentMs(),
             trackingState: trackingString(
                                frame.camera.trackingState)
