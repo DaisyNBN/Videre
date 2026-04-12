@@ -1142,6 +1142,85 @@ final class APIService {
         return routeId
     }
 
+    func generateRouteToRoom(
+            mapId: String,
+            startX: Double,
+            startY: Double,
+            startZ: Double,
+            destinationLabel: String,
+            blockedNodeIds: [String] = []
+    ) async throws -> String {
+        let payload: [String: Any] = [
+            "mapId": mapId,
+            "start": [
+                "x": startX,
+                "y": startY,
+                "z": startZ,
+            ],
+            "destinationLabel": destinationLabel,
+            "blockedNodeIds": blockedNodeIds,
+        ]
+
+        if Constants.apiDryRun {
+            print("POST \(apiBaseURL)/navigation/routes/to-room")
+            print(Self.jsonBlock(payload))
+            let dryRouteId = "dry-route-room-\(mapId)"
+            let fallbackNodes = Array(cachedMapNodesById.keys.prefix(2))
+            let startNodeId = fallbackNodes.first ?? "start-node"
+            let endNodeId = (fallbackNodes.last ?? fallbackNodes.first) ?? "end-node"
+            cachedRouteNodeIds = [startNodeId, endNodeId].filter { !$0.isEmpty }
+            setActiveRouteContext(
+                mapId: mapId,
+                routeId: dryRouteId,
+                startNodeId: startNodeId,
+                endNodeId: endNodeId
+            )
+            return dryRouteId
+        }
+
+        let response = try await requestJSON(
+            path: "/navigation/routes/to-room",
+            method: "POST",
+            payload: payload
+        )
+        let data = try extractApiData(response)
+
+        guard let routeId = stringValue(data["routeId"]), !routeId.isEmpty else {
+            throw NSError(
+                domain: "APIService",
+                code: 12,
+                userInfo: [NSLocalizedDescriptionKey: "Destination room route response missing route id"]
+            )
+        }
+
+        let startNodeId = stringValue(data["startNodeId"])
+            ?? stringValue(data["start_node_id"])
+            ?? ""
+        let endNodeId = stringValue(data["endNodeId"])
+            ?? stringValue(data["end_node_id"])
+            ?? ""
+
+        guard !startNodeId.isEmpty, !endNodeId.isEmpty else {
+            throw NSError(
+                domain: "APIService",
+                code: 13,
+                userInfo: [NSLocalizedDescriptionKey: "Destination room route response missing start/end nodes"]
+            )
+        }
+
+        let routeNodeIds = (data["nodeIds"] as? [String])?.filter { !$0.isEmpty } ?? []
+        cachedRouteNodeIds = routeNodeIds.isEmpty ? [startNodeId, endNodeId] : routeNodeIds
+
+        setActiveRouteContext(
+            mapId: mapId,
+            routeId: routeId,
+            startNodeId: startNodeId,
+            endNodeId: endNodeId
+        )
+
+        return routeId
+    }
+
     func rerouteActiveRoute(
             reason: String,
             obstacleNodeIds: [String] = [],

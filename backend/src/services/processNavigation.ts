@@ -65,6 +65,17 @@ export type GenerateRouteFromCoordinatesRequest = {
   blockedNodeIds?: string[];
 };
 
+export type GenerateRouteToRoomRequest = {
+  mapId: string;
+  start: {
+    x: number;
+    y: number;
+    z?: number;
+  };
+  destinationLabel: string;
+  blockedNodeIds?: string[];
+};
+
 export type GeneratedRoute = {
   routeId: string;
   mapId: string;
@@ -97,6 +108,17 @@ type ResolvedRouteNodes = {
   endNodeId: string;
   startDistance: number;
   endDistance: number;
+};
+
+type DestinationLandmarkRow = {
+  id: string;
+  label: string | null;
+  type: string;
+  confidence: number | null;
+  status: string | null;
+  x: number;
+  y: number;
+  z: number;
 };
 
 function isUndefinedTableOrColumn(error: PostgrestLikeError | null | undefined): boolean {
@@ -344,50 +366,128 @@ function distanceToNode(
   return Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
 }
 
+function normalizeText(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function resolveNearestNodeFromPoint(
+  nodesById: Map<string, RouteNodeRow>,
+  point: { x: number; y: number; z?: number },
+  blockedNodeIds: Set<string>,
+  excludeNodeIds: Set<string> = new Set(),
+): { nodeId: string; distance: number } {
+  const candidates = Array.from(nodesById.values())
+    .filter((node) => !blockedNodeIds.has(node.id) && !excludeNodeIds.has(node.id));
+
+  if (candidates.length === 0) {
+    throw new NavigationError(404, "No available map nodes after filtering");
+  }
+
+  const ranked = candidates
+    .map((node) => ({ nodeId: node.id, distance: distanceToNode(node, point) }))
+    .sort((a, b) => a.distance - b.distance);
+
+  const best = ranked[0];
+  if (!best) {
+    throw new NavigationError(404, "Unable to resolve nearest node from provided coordinates");
+  }
+
+  return best;
+}
+
+async function resolveDestinationLandmark(
+  mapId: string,
+  destinationLabel: string,
+): Promise<DestinationLandmarkRow> {
+  const { data, error } = await supabase
+    .from("landmarks")
+    .select("id, label, type, confidence, status, x, y, z")
+    .eq("room_map_id", mapId);
+
+  if (error) {
+    if (isUndefinedTableOrColumn(error)) {
+      throw new NavigationError(
+        500,
+        "Landmark storage is unavailable for room destination routing",
+      );
+    }
+
+    logger.error("Failed to load landmarks for room destination routing: %o", error);
+    throw new NavigationError(500, "Failed to resolve destination room");
+  }
+
+  const query = normalizeText(destinationLabel);
+  const candidates = ((data ?? []) as DestinationLandmarkRow[])
+    .filter((landmark) => typeof landmark.label === "string" && landmark.label.trim().length > 0)
+    .filter((landmark) => {
+      const label = normalizeText(landmark.label ?? "");
+      return (
+        label === query ||
+        label.startsWith(query) ||
+        label.includes(query) ||
+        query.includes(label)
+      );
+    })
+    .map((landmark) => {
+      const label = normalizeText(landmark.label ?? "");
+      let score = 0;
+
+      if (label === query) {
+        score += 100;
+      } else if (label.startsWith(query)) {
+        score += 85;
+      } else if (label.includes(query)) {
+        score += 70;
+      } else if (query.includes(label)) {
+        score += 55;
+      }
+
+      if (landmark.status === "verified") {
+        score += 12;
+      } else if (landmark.status === "pending") {
+        score += 4;
+      } else if (landmark.status === "rejected") {
+        score -= 12;
+      }
+
+      if (typeof landmark.confidence === "number" && Number.isFinite(landmark.confidence)) {
+        score += Math.max(0, Math.min(landmark.confidence, 1)) * 10;
+      }
+
+      return {
+        landmark,
+        score,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  if (candidates.length === 0) {
+    throw new NavigationError(
+      404,
+      `No destination room matched label \"${destinationLabel}\" on this map`,
+    );
+  }
+
+  return candidates[0].landmark;
+}
+
 function resolveRouteNodesFromCoordinates(
   nodesById: Map<string, RouteNodeRow>,
   start: { x: number; y: number; z?: number },
   end: { x: number; y: number; z?: number },
   blockedNodeIds: Set<string>,
 ): ResolvedRouteNodes {
-  const candidates = Array.from(nodesById.values())
-    .filter((node) => !blockedNodeIds.has(node.id));
-
-  if (candidates.length === 0) {
-    throw new NavigationError(404, "No available map nodes after blocked-node filtering");
-  }
-
-  const rankedStart = candidates
-    .map((node) => ({ node, distance: distanceToNode(node, start) }))
-    .sort((a, b) => a.distance - b.distance);
-
-  const rankedEnd = candidates
-    .map((node) => ({ node, distance: distanceToNode(node, end) }))
-    .sort((a, b) => a.distance - b.distance);
-
-  const bestStart = rankedStart[0];
-  if (!bestStart) {
-    throw new NavigationError(404, "Unable to resolve start node from map coordinates");
-  }
-
-  const bestEnd =
-    rankedEnd.find((candidate) => candidate.node.id !== bestStart.node.id)
-    ?? rankedEnd[0];
-
-  if (!bestEnd) {
-    throw new NavigationError(404, "Unable to resolve end node from map coordinates");
-  }
-
-  if (bestStart.node.id === bestEnd.node.id) {
-    throw new NavigationError(
-      400,
-      "Start and end coordinates resolved to the same node; provide farther-apart coordinates",
-    );
-  }
+  const bestStart = resolveNearestNodeFromPoint(nodesById, start, blockedNodeIds);
+  const bestEnd = resolveNearestNodeFromPoint(
+    nodesById,
+    end,
+    blockedNodeIds,
+    new Set([bestStart.nodeId]),
+  );
 
   return {
-    startNodeId: bestStart.node.id,
-    endNodeId: bestEnd.node.id,
+    startNodeId: bestStart.nodeId,
+    endNodeId: bestEnd.nodeId,
     startDistance: bestStart.distance,
     endDistance: bestEnd.distance,
   };
@@ -497,6 +597,64 @@ export async function generateNavigationRouteFromCoordinates(
     resolvedFromCoordinates: {
       startDistance: Number(resolved.startDistance.toFixed(3)),
       endDistance: Number(resolved.endDistance.toFixed(3)),
+    },
+  };
+}
+
+export async function generateNavigationRouteToRoom(
+  request: GenerateRouteToRoomRequest,
+): Promise<GeneratedRoute & {
+  destination: {
+    landmarkId: string;
+    label: string;
+    type: string;
+    status: string | null;
+    confidence: number | null;
+  };
+  resolvedFromCoordinates: {
+    startDistance: number;
+    destinationDistance: number;
+  };
+}> {
+  const { mapId, start, destinationLabel } = request;
+
+  if (!mapId || !start || !destinationLabel?.trim()) {
+    throw new NavigationError(400, "mapId, start coordinates, and destinationLabel are required");
+  }
+
+  const blockedNodeIds = new Set(
+    (request.blockedNodeIds ?? []).filter((nodeId) => typeof nodeId === "string"),
+  );
+
+  const { nodesById } = await loadRouteGraph(mapId);
+  const destinationLandmark = await resolveDestinationLandmark(mapId, destinationLabel);
+  const startNode = resolveNearestNodeFromPoint(nodesById, start, blockedNodeIds);
+  const destinationNode = resolveNearestNodeFromPoint(
+    nodesById,
+    { x: destinationLandmark.x, y: destinationLandmark.y, z: destinationLandmark.z },
+    blockedNodeIds,
+    new Set([startNode.nodeId]),
+  );
+
+  const route = await generateNavigationRoute({
+    mapId,
+    startNodeId: startNode.nodeId,
+    endNodeId: destinationNode.nodeId,
+    blockedNodeIds: [...blockedNodeIds],
+  });
+
+  return {
+    ...route,
+    destination: {
+      landmarkId: destinationLandmark.id,
+      label: destinationLandmark.label ?? destinationLabel,
+      type: destinationLandmark.type,
+      status: destinationLandmark.status,
+      confidence: destinationLandmark.confidence,
+    },
+    resolvedFromCoordinates: {
+      startDistance: Number(startNode.distance.toFixed(3)),
+      destinationDistance: Number(destinationNode.distance.toFixed(3)),
     },
   };
 }

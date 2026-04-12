@@ -5,11 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
     mockGenerateNavigationRoute,
     mockGenerateNavigationRouteFromCoordinates,
+    mockGenerateNavigationRouteToRoom,
     mockGetNavigationInstruction,
     mockRerouteNavigation,
 } = vi.hoisted(() => ({
     mockGenerateNavigationRoute: vi.fn(),
     mockGenerateNavigationRouteFromCoordinates: vi.fn(),
+    mockGenerateNavigationRouteToRoom: vi.fn(),
     mockGetNavigationInstruction: vi.fn(),
     mockRerouteNavigation: vi.fn(),
 }));
@@ -25,6 +27,7 @@ vi.mock("../../src/services/processNavigation", () => ({
     },
     generateNavigationRoute: mockGenerateNavigationRoute,
     generateNavigationRouteFromCoordinates: mockGenerateNavigationRouteFromCoordinates,
+    generateNavigationRouteToRoom: mockGenerateNavigationRouteToRoom,
     getNavigationInstruction: mockGetNavigationInstruction,
     rerouteNavigation: mockRerouteNavigation,
 }));
@@ -50,6 +53,7 @@ describe("navigation routes", () => {
     beforeEach(() => {
         mockGenerateNavigationRoute.mockReset();
         mockGenerateNavigationRouteFromCoordinates.mockReset();
+        mockGenerateNavigationRouteToRoom.mockReset();
         mockGetNavigationInstruction.mockReset();
         mockRerouteNavigation.mockReset();
     });
@@ -171,6 +175,58 @@ describe("navigation routes", () => {
             mapId: "map-1",
             start: { x: 0.1, y: 0.2 },
             end: { x: 3.5, y: 1.4 },
+            blockedNodeIds: [],
+        });
+    });
+
+    it("generates route to destination room", async () => {
+        mockGenerateNavigationRouteToRoom.mockResolvedValue({
+            routeId: "route-room-1",
+            mapId: "map-1",
+            startNodeId: "node-a",
+            endNodeId: "node-r201",
+            nodeIds: ["node-a", "node-r201"],
+            checkpoints: [
+                {
+                    order: 1,
+                    nodeId: "node-a",
+                    label: "start",
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                },
+            ],
+            checkpointStorage: "in-memory",
+            destination: {
+                landmarkId: "lm-201",
+                label: "Room 201",
+                type: "door",
+                status: "verified",
+                confidence: 0.94,
+            },
+            resolvedFromCoordinates: {
+                startDistance: 0.114,
+                destinationDistance: 0.208,
+            },
+        });
+
+        const app = createApp();
+
+        const response = await request(app)
+            .post("/api/navigation/routes/to-room")
+            .send({
+                mapId: "map-1",
+                start: { x: 0.1, y: 0.2, z: 0.0 },
+                destinationLabel: "Room 201",
+            });
+
+        expect(response.status).toBe(201);
+        expect(response.body.success).toBe(true);
+        expect(response.body.data.routeId).toBe("route-room-1");
+        expect(mockGenerateNavigationRouteToRoom).toHaveBeenCalledWith({
+            mapId: "map-1",
+            start: { x: 0.1, y: 0.2, z: 0.0 },
+            destinationLabel: "Room 201",
             blockedNodeIds: [],
         });
     });

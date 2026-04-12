@@ -141,14 +141,14 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Called from LiDARService every AR frame ────────
     func onARFrame(_ frame: ARFrame) {
-        guard isScanning else { return }
-
         let t   = frame.camera.transform
         currentPosition = simd_float3(
             t.columns.3.x,
             t.columns.3.y,
             t.columns.3.z
         )
+
+        guard isScanning else { return }
 
         let now = frame.timestamp
 

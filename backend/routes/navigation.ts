@@ -5,6 +5,7 @@ import logger from "../src/services/logger";
 import {
   generateNavigationRoute,
   generateNavigationRouteFromCoordinates,
+  generateNavigationRouteToRoom,
   getNavigationInstruction,
   NavigationError,
   rerouteNavigation,
@@ -17,8 +18,10 @@ import {
   NavigationRerouteBody,
   navigationRouteBodySchema,
   navigationRouteFromCoordinatesBodySchema,
+  navigationRouteToRoomBodySchema,
   NavigationRouteBody,
   NavigationRouteFromCoordinatesBody,
+  NavigationRouteToRoomBody,
 } from "../src/schemas/navigation";
 
 const router = Router();
@@ -87,6 +90,32 @@ router.post(
 
       logger.error("Navigation route generation from coordinates error: %o", err);
       return res.status(500).json(new ApiResponse(false, "Failed to generate route from coordinates"));
+    }
+  },
+);
+
+router.post(
+  "/routes/to-room",
+  validateBody(navigationRouteToRoomBodySchema),
+  async (req: Request, res: Response) => {
+    const body = req.body as NavigationRouteToRoomBody;
+
+    try {
+      const route = await generateNavigationRouteToRoom({
+        mapId: body.mapId,
+        start: body.start,
+        destinationLabel: body.destinationLabel,
+        blockedNodeIds: body.blockedNodeIds,
+      });
+
+      return res.status(201).json(new ApiResponse(true, "Route generated to destination room", route));
+    } catch (err) {
+      if (err instanceof NavigationError) {
+        return res.status(err.statusCode).json(new ApiResponse(false, err.message));
+      }
+
+      logger.error("Navigation room route generation error: %o", err);
+      return res.status(500).json(new ApiResponse(false, "Failed to generate route to destination room"));
     }
   },
 );

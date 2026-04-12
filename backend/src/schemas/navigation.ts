@@ -41,6 +41,13 @@ export const navigationRouteFromCoordinatesBodySchema = z.object({
     blockedNodeIds: z.array(z.string().min(1)).optional().default([]),
 });
 
+export const navigationRouteToRoomBodySchema = z.object({
+    mapId: z.string().min(1),
+    start: coordinateSchema,
+    destinationLabel: z.string().min(1),
+    blockedNodeIds: z.array(z.string().min(1)).optional().default([]),
+});
+
 export const navigationRerouteBodySchema = navigationRouteBodySchema.extend({
     obstacleNodeIds: z.array(z.string().min(1)).optional().default([]),
     reason: z.string().optional(),
@@ -50,4 +57,6 @@ export type NavigationInstructionBody = z.infer<typeof navigationInstructionBody
 export type NavigationRouteBody = z.infer<typeof navigationRouteBodySchema>;
 export type NavigationRouteFromCoordinatesBody =
     z.infer<typeof navigationRouteFromCoordinatesBodySchema>;
+export type NavigationRouteToRoomBody =
+    z.infer<typeof navigationRouteToRoomBodySchema>;
 export type NavigationRerouteBody = z.infer<typeof navigationRerouteBodySchema>;
