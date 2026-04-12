@@ -31,8 +31,11 @@ Use sampled points from AR tracking.
   - `x`, `y`, `z`
   - `timestamp`
 - optional quality per point:
+  - `latitude`
+  - `longitude`
   - `horizontalAccuracy`
   - `verticalAccuracy`
+  - `headingDegrees`
   - `trackingState`
 
 ## 3. Landmarks (Manual and AI-Ready)
@@ -46,6 +49,12 @@ Collect user-tagged landmarks to improve map quality.
   - `x`, `y`, `z`
   - `source` (`user`)
   - `timestamp`
+- optional fused context per landmark:
+  - `headingDegrees`
+  - `latitude`
+  - `longitude`
+  - `horizontalAccuracy`
+  - `verticalAccuracy`
 
 ## 4. LiDAR and Depth Evidence
 
