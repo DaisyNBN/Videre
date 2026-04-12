@@ -1,18 +1,13 @@
-//
-//  VidereApp.swift
-//  Videre_ios_app
-//
-//  Created by Ngan Nguyen on 4/12/26.
-//
-
 import SwiftUI
 
 @main
 struct VidereApp: App {
 
-    @StateObject private var bleManager  = BLEManager()
-    @StateObject private var appState    = AppState()
+    @StateObject private var bleManager   = BLEManager()
     @StateObject private var lidarService = LiDARService.shared
+    @StateObject private var scanService  = ScanService.shared
+    @StateObject private var appState     = AppState()
+    @StateObject private var navigationContext = NavigationContextService()
 
     init() {
         UIApplication.shared.isIdleTimerDisabled = true
@@ -21,13 +16,17 @@ struct VidereApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MainTabView()
                 .environmentObject(bleManager)
-                .environmentObject(appState)
                 .environmentObject(lidarService)
+                .environmentObject(scanService)
+                .environmentObject(appState)
+                .environmentObject(navigationContext)
                 .onAppear {
-                    LiDARService.shared.configure(appState: appState)
-                    // no need to call start() here — LiDARService starts itself
-                }        }
+                    LiDARService.shared.configure(
+                        appState: appState)
+                    navigationContext.start()
+                }
+        }
     }
 }
