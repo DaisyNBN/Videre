@@ -5,7 +5,8 @@ import { getFallbackResponse } from "../fallback";
 
 const GEMINI_TIMEOUT_MS = 3000;
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? "");
+const geminiApiKey = process.env.GEMINI_API_KEY;
+const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
 
 function buildPrompt(
   obstacles: Obstacle[],
@@ -74,11 +75,28 @@ function parseGeminiResponse(
   };
 }
 
+function stripCodeFence(text: string): string {
+  return text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+}
+
+function parseVisionPayload(text: string): { landmarks: any[]; obstacles: any[] } {
+  const parsed = JSON.parse(stripCodeFence(text));
+
+  const landmarks = Array.isArray(parsed.landmarks) ? parsed.landmarks : [];
+  const obstacles = Array.isArray(parsed.obstacles) ? parsed.obstacles : [];
+
+  return { landmarks, obstacles };
+}
+
 export async function getGeminiNavResponse(
   request: NavRequest,
   checkpoint?: { label: string; distance: number }
 ): Promise<NavResponse> {
   try {
+    if (!genAI) {
+      throw new Error("Missing GEMINI_API_KEY");
+    }
+
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
     const prompt = buildPrompt(
@@ -113,5 +131,101 @@ export async function getGeminiNavResponse(
     // Fix 2: Gemini failed or timed out — fallback keeps the user safe
     console.error("Gemini error, using fallback:", err);
     return getFallbackResponse(request.obstacles, checkpoint);
+  }
+}
+
+export async function analyzeImageWithGemini(
+  imageUrl: string,
+  depthData: unknown,
+  cameraPose: { x: number; y: number; z: number }
+): Promise<{ landmarks: any[]; obstacles: any[] }> {
+  // verify inputs
+  if (!imageUrl) {
+    throw new Error("Image URL is required");
+  }
+  if (!cameraPose || typeof cameraPose.x !== "number" || typeof cameraPose.y !== "number" || typeof cameraPose.z !== "number") {
+    throw new Error("Valid camera pose is required");
+  }
+  try {
+    if (!genAI) {
+      throw new Error("Missing GEMINI_API_KEY");
+    }
+
+    let mimeType: string;
+    let base64Image: string;
+
+    if (imageUrl.startsWith("data:")) {
+      const match = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (!match) {
+        throw new Error("Invalid base64 data URI format");
+      }
+
+      mimeType = match[1];
+      base64Image = match[2];
+    } else {
+      const imageResponse = await fetch(imageUrl);
+      if (!imageResponse.ok) {
+        throw new Error(`Failed to fetch image: ${imageResponse.status} ${imageResponse.statusText}`);
+      }
+
+      mimeType = imageResponse.headers.get("content-type") || "image/jpeg";
+      const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+      base64Image = imageBuffer.toString("base64");
+    }
+
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const visionPrompt = `You are an indoor accessibility scene parser.
+
+Analyze the provided image and return JSON only (no markdown, no backticks) in this exact shape:
+{
+  "landmarks": [
+    {
+      "type": "door|wall|stair|elevator|obstacle|exit|unknown",
+      "label": "string",
+      "confidence": 0.0,
+      "source": "gemini"
+    }
+  ],
+  "obstacles": [
+    {
+      "label": "string",
+      "position": "left|center|right",
+      "distance_estimate": "near|mid|far",
+      "confidence": 0.0
+    }
+  ]
+}
+
+Context:
+- cameraPose: ${JSON.stringify(cameraPose)}
+- depthData: ${JSON.stringify(depthData ?? null)}
+
+Rules:
+- Return empty arrays when uncertain.
+- Only use allowed enum values.
+- Keep labels short and practical for blind navigation.
+- Confidence must be a number between 0 and 1.`;
+
+    const result = await Promise.race([
+      model.generateContent([
+        { text: visionPrompt },
+        {
+          inlineData: {
+            mimeType,
+            data: base64Image,
+          },
+        },
+      ]),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Gemini vision timeout")), GEMINI_TIMEOUT_MS)
+      ),
+    ]);
+
+    const text = result.response.text();
+    return parseVisionPayload(text);
+  } catch (err) {
+    console.error("Gemini vision analysis failed:", err);
+    return { landmarks: [], obstacles: [] };
   }
 }

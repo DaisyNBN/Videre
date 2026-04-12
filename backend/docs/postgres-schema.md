@@ -70,7 +70,6 @@ This schema separates scan-time ingestion data from canonical map/graph data, th
 ### scans
 
 - `id uuid primary key`
-- `user_id uuid not null`
 - `room_name text not null`
 - `processing_status text not null default uploaded`
 - `created_at timestamptz not null default now()`
@@ -113,7 +112,6 @@ This schema separates scan-time ingestion data from canonical map/graph data, th
 ### hazard_reports
 
 - `id bigserial primary key`
-- `user_id uuid not null`
 - `lat double precision not null`
 - `lng double precision not null`
 - `type text not null`

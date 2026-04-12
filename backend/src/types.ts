@@ -1,4 +1,4 @@
-export interface HazardReport {
+export type HazardReport = {
   user_id: string;
   lat: number;
   lng: number;
@@ -8,7 +8,7 @@ export interface HazardReport {
   verified: boolean;
 }
 
-export interface NavRequest {
+export type NavRequest = {
   user_id: string;
   route_id: string;
   location: { lat: number; lng: number };
@@ -17,13 +17,13 @@ export interface NavRequest {
   speed: "walking" | "stopped";
 }
 
-export interface Obstacle {
+export type Obstacle = {
   label: string;
   position: "left" | "center" | "right";
   distance_estimate: "near" | "mid" | "far";
 }
 
-export interface NavResponse {
+export type NavResponse = {
   instruction: string;
   urgency: "low" | "medium" | "high";
   haptic_pattern: "none" | "single_tap" | "double_tap" | "continuous";
@@ -35,7 +35,7 @@ export interface NavResponse {
 // ==============================
 // Base Spatial Types
 // ==============================
-export interface Vector3 {
+export type Vector3 = {
   x: number;
   y: number;
   z: number;
@@ -44,7 +44,7 @@ export interface Vector3 {
 // ==============================
 // Scan Data Types (iOS)
 // ==============================
-export interface ScanPoint extends Vector3 {
+export type ScanPoint = Vector3 & {
   timestamp?: number;
 };
 
@@ -60,7 +60,7 @@ export type LandmarkType =
   | "exit"
   | "unknown";
 
-export interface Landmark extends Vector3 {
+export type Landmark = Vector3 & {
   id?: string;
   type: LandmarkType;
   label?: string;
@@ -71,7 +71,7 @@ export interface Landmark extends Vector3 {
 // ==============================
 // AI Detection Types
 // ==============================
-export interface AIObjectDetection {
+export type AIObjectDetection = {
   label: string;
   confidence: number;
   boundingBox?: {
@@ -87,20 +87,20 @@ export interface AIObjectDetection {
 // ==============================
 export type NodeType = "path" | "landmark" | "start" | "end";
 
-export interface MapNode extends Vector3 {
+export type MapNode = Vector3 & {
   id: string;
   type: NodeType;
   label?: string;
 };
 
-export interface MapEdge {
+export type MapEdge = {
   from: string;
   to: string;
   distance: number;
   walkable: boolean;
 };
 
-export interface RoomMap {
+export type RoomMap = {
   id: string;
   roomName: string;
   createdBy: string;
@@ -113,14 +113,14 @@ export interface RoomMap {
 // ==============================
 // API Request Types
 // ==============================
-export interface ScanUploadRequest {
+export type ScanUploadRequest = {
   userId: string;
   roomName: string;
   points: ScanPoint[];
   landmarks: Landmark[];
 };
 
-export interface AIProcessRequest {
+export type AIProcessRequest = {
   imageUrl: string;
   depthData?: unknown;
   cameraPose: Vector3;
@@ -131,7 +131,7 @@ export interface AIProcessRequest {
 // ==============================
 export type VerificationStatus = "pending" | "verified" | "rejected";
 
-export interface LandmarkVerification {
+export type LandmarkVerification = {
   landmarkId: string;
   verifiedBy: string;
   status: VerificationStatus;
@@ -141,7 +141,7 @@ export interface LandmarkVerification {
 // ==============================
 // Pathfinding Types
 // ==============================
-export interface PathRequest {
+export type PathRequest = {
   mapId: string;
   startNodeId: string;
   endNodeId: string;
