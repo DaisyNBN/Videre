@@ -8,6 +8,7 @@ import {
 import {
   mapContributionsCreateBodySchema,
   mapContributionsListQuerySchema,
+  mapAnchorNearbyQuerySchema,
   mapCreateBodySchema,
   mapCreateLandmarkBodySchema,
   mapIdParamsSchema,
@@ -16,6 +17,7 @@ import {
   mapUpdateLandmarkBodySchema,
   MapContributionsCreateBody,
   MapContributionsListQuery,
+  MapAnchorNearbyQuery,
   MapCreateBody,
   MapCreateLandmarkBody,
   MapIdParams,
@@ -36,6 +38,7 @@ import {
   createMapLandmark,
   deleteMapLandmark,
   getMapVerificationSummary,
+  listNearbyAnchoredLandmarks,
   listMapLandmarks,
   ProcessLandmarkError,
   updateMapLandmark,
@@ -102,6 +105,37 @@ router.get("/", validateQuery(mapListQuerySchema), async (req: Request, res: Res
     return res
       .status(500)
       .json(new ApiResponse(false, "Failed to list maps"));
+  }
+});
+
+router.get("/anchors/nearby", validateQuery(mapAnchorNearbyQuerySchema), async (req: Request, res: Response) => {
+  const { lat, lng, radius, roomName, type } = mapAnchorNearbyQuerySchema.parse(
+    req.query,
+  ) as MapAnchorNearbyQuery;
+
+  try {
+    const anchors = await listNearbyAnchoredLandmarks({
+      lat,
+      lng,
+      radiusMeters: radius,
+      roomName,
+      type,
+    });
+
+    return res.json(new ApiResponse(true, "Nearby anchored landmarks fetched", {
+      anchors,
+    }));
+  } catch (error) {
+    if (error instanceof ProcessLandmarkError) {
+      return res
+        .status(error.statusCode)
+        .json(new ApiResponse(false, error.message));
+    }
+
+    logger.error("Unexpected nearby anchor lookup error: %o", error);
+    return res
+      .status(500)
+      .json(new ApiResponse(false, "Failed to fetch nearby anchored landmarks"));
   }
 });
 
@@ -185,6 +219,8 @@ router.post(
         z: body.z,
         source: body.source,
         confidence: body.confidence,
+        anchorLat: body.anchorLat,
+        anchorLng: body.anchorLng,
       });
 
       return res
@@ -243,6 +279,8 @@ router.patch(
         y: body.y,
         z: body.z,
         source: body.source,
+        anchorLat: body.anchorLat,
+        anchorLng: body.anchorLng,
       });
 
       return res.json(new ApiResponse(true, "Landmark updated", updated));

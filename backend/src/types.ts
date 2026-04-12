@@ -24,7 +24,7 @@ export type Obstacle = {
 export type NavResponse = {
   instruction: string;
   urgency: "low" | "medium" | "high";
-  haptic_pattern: "none" | "single_tap" | "double_tap" | "continuous";
+  haptic_pattern: "none" | "single_tap" | "double_tap" | "triple_tap" | "continuous";
   next_checkpoint: string | null;
   distance_to_next_m: number | null;
   fallback_used: boolean;
@@ -64,6 +64,8 @@ export type Landmark = Vector3 & {
   label?: string;
   confidence?: number;
   source?: "user" | "gemini";
+  anchorLat?: number;
+  anchorLng?: number;
 };
 
 // ==============================

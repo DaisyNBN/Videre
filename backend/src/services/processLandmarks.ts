@@ -21,8 +21,14 @@ type LandmarkRow = {
     x: number;
     y: number;
     z: number;
+    anchor_lat: number | null;
+    anchor_lng: number | null;
     status: VerificationStatus;
     created_at: string;
+};
+
+type NearbyAnchorRow = LandmarkRow & {
+    room_maps?: { room_name: string } | Array<{ room_name: string }> | null;
 };
 
 type LandmarkVerificationRow = {
@@ -81,6 +87,32 @@ function asNumber(value: unknown, fallback = 0): number {
     }
 
     return fallback;
+}
+
+function isUndefinedColumnError(error: { code?: string; message?: string } | null | undefined): boolean {
+    if (!error) {
+        return false;
+    }
+
+    return (
+        error.code === "PGRST204" ||
+        error.code === "42703" ||
+        /could not find the '.+' column of '.+'/i.test(error.message ?? "") ||
+        /column\s+.+\s+does not exist/i.test(error.message ?? "")
+    );
+}
+
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const r = 6_371_000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) *
+            Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLng / 2) * Math.sin(dLng / 2);
+
+    return 2 * r * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
 }
 
 async function ensureMapExists(mapId: string): Promise<void> {
@@ -155,6 +187,8 @@ export async function createMapLandmark(input: {
     z: unknown;
     source?: unknown;
     confidence?: unknown;
+    anchorLat?: unknown;
+    anchorLng?: unknown;
 }): Promise<LandmarkRow> {
     await ensureMapExists(input.mapId);
 
@@ -170,14 +204,31 @@ export async function createMapLandmark(input: {
         x: asNumber(input.x),
         y: asNumber(input.y),
         z: asNumber(input.z),
+        anchor_lat:
+            typeof input.anchorLat === "number" && Number.isFinite(input.anchorLat)
+                ? input.anchorLat
+                : null,
+        anchor_lng:
+            typeof input.anchorLng === "number" && Number.isFinite(input.anchorLng)
+                ? input.anchorLng
+                : null,
         status: "pending" as VerificationStatus,
     };
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
         .from("landmarks")
         .insert(payload)
         .select("*")
         .single();
+
+    if (error && isUndefinedColumnError(error)) {
+        const { anchor_lat: _ignoredLat, anchor_lng: _ignoredLng, ...legacyPayload } = payload;
+        ({ data, error } = await supabase
+            .from("landmarks")
+            .insert(legacyPayload)
+            .select("*")
+            .single());
+    }
 
     if (error || !data) {
         throw new ProcessLandmarkError(500, "Failed to create landmark");
@@ -211,6 +262,8 @@ export async function updateMapLandmark(input: {
     y?: unknown;
     z?: unknown;
     source?: unknown;
+    anchorLat?: unknown;
+    anchorLng?: unknown;
 }): Promise<LandmarkRow> {
     await ensureMapExists(input.mapId);
 
@@ -245,7 +298,21 @@ export async function updateMapLandmark(input: {
         patch.source = input.source === "gemini" ? "gemini" : "user";
     }
 
-    const { data, error } = await supabase
+    if (input.anchorLat !== undefined) {
+        patch.anchor_lat =
+            typeof input.anchorLat === "number" && Number.isFinite(input.anchorLat)
+                ? input.anchorLat
+                : null;
+    }
+
+    if (input.anchorLng !== undefined) {
+        patch.anchor_lng =
+            typeof input.anchorLng === "number" && Number.isFinite(input.anchorLng)
+                ? input.anchorLng
+                : null;
+    }
+
+    let { data, error } = await supabase
         .from("landmarks")
         .update(patch)
         .eq("id", input.landmarkId)
@@ -253,11 +320,108 @@ export async function updateMapLandmark(input: {
         .select("*")
         .single();
 
+    if (error && isUndefinedColumnError(error)) {
+        delete patch.anchor_lat;
+        delete patch.anchor_lng;
+        ({ data, error } = await supabase
+            .from("landmarks")
+            .update(patch)
+            .eq("id", input.landmarkId)
+            .eq("room_map_id", input.mapId)
+            .select("*")
+            .single());
+    }
+
     if (error || !data) {
         throw new ProcessLandmarkError(500, "Failed to update landmark");
     }
 
     return data as LandmarkRow;
+}
+
+export async function listNearbyAnchoredLandmarks(input: {
+    lat: number;
+    lng: number;
+    radiusMeters?: number;
+    roomName?: string;
+    type?: LandmarkType;
+}): Promise<Array<{
+    id: string;
+    roomMapId: string;
+    roomName: string;
+    type: LandmarkType;
+    label: string | null;
+    status: VerificationStatus;
+    confidence: number | null;
+    anchorLat: number;
+    anchorLng: number;
+    distanceMeters: number;
+}>> {
+    const radiusMeters = Math.max(5, Math.min(input.radiusMeters ?? 40, 250));
+    const roomNameFilter = input.roomName?.trim().toLowerCase();
+
+    const { data, error } = await supabase
+        .from("landmarks")
+        .select("id, room_map_id, type, label, confidence, source, x, y, z, anchor_lat, anchor_lng, status, created_at, room_maps(room_name)")
+        .not("anchor_lat", "is", null)
+        .not("anchor_lng", "is", null)
+        .eq("status", "verified");
+
+    if (error) {
+        if (isUndefinedColumnError(error)) {
+            return [];
+        }
+        throw new ProcessLandmarkError(500, "Failed to fetch nearby anchored landmarks");
+    }
+
+    return ((data ?? []) as NearbyAnchorRow[])
+        .map((row) => {
+            const joinedRoom = Array.isArray(row.room_maps)
+                ? row.room_maps[0]
+                : row.room_maps;
+
+            const anchorLat = row.anchor_lat;
+            const anchorLng = row.anchor_lng;
+            if (typeof anchorLat !== "number" || typeof anchorLng !== "number") {
+                return null;
+            }
+
+            const roomName = joinedRoom?.room_name ?? "Unknown room";
+            const distanceMeters = haversineMeters(input.lat, input.lng, anchorLat, anchorLng);
+
+            return {
+                id: row.id,
+                roomMapId: row.room_map_id,
+                roomName,
+                type: row.type,
+                label: row.label,
+                status: row.status,
+                confidence: row.confidence,
+                anchorLat,
+                anchorLng,
+                distanceMeters,
+            };
+        })
+        .filter((row): row is NonNullable<typeof row> => {
+            if (!row) {
+                return false;
+            }
+
+            if (row.distanceMeters > radiusMeters) {
+                return false;
+            }
+
+            if (input.type && row.type !== input.type) {
+                return false;
+            }
+
+            if (roomNameFilter && row.roomName.trim().toLowerCase() !== roomNameFilter) {
+                return false;
+            }
+
+            return true;
+        })
+        .sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
 export async function deleteMapLandmark(input: {

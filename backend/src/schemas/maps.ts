@@ -25,6 +25,8 @@ const landmarkSchema = vector3Schema.extend({
     label: z.string().optional(),
     confidence: z.number().finite().min(0).max(1).optional(),
     source: z.enum(["user", "gemini"]).optional(),
+    anchorLat: z.number().finite().min(-90).max(90).optional(),
+    anchorLng: z.number().finite().min(-180).max(180).optional(),
 });
 
 export const mapIdParamsSchema = z.object({
@@ -63,6 +65,8 @@ export const mapCreateLandmarkBodySchema = z.object({
     z: z.number().finite(),
     source: z.enum(["user", "gemini"]).optional(),
     confidence: z.number().finite().min(0).max(1).optional(),
+    anchorLat: z.number().finite().min(-90).max(90).optional(),
+    anchorLng: z.number().finite().min(-180).max(180).optional(),
 });
 
 export const mapUpdateLandmarkBodySchema = z.object({
@@ -72,6 +76,16 @@ export const mapUpdateLandmarkBodySchema = z.object({
     y: z.number().finite().optional(),
     z: z.number().finite().optional(),
     source: z.enum(["user", "gemini"]).optional(),
+    anchorLat: z.number().finite().min(-90).max(90).optional(),
+    anchorLng: z.number().finite().min(-180).max(180).optional(),
+});
+
+export const mapAnchorNearbyQuerySchema = z.object({
+    lat: z.coerce.number().finite(),
+    lng: z.coerce.number().finite(),
+    radius: z.coerce.number().finite().positive().optional(),
+    roomName: z.string().optional(),
+    type: landmarkTypeSchema.optional(),
 });
 
 export const mapContributionsCreateBodySchema = z.object({
@@ -96,5 +110,6 @@ export type MapCreateBody = z.infer<typeof mapCreateBodySchema>;
 export type MapListQuery = z.infer<typeof mapListQuerySchema>;
 export type MapCreateLandmarkBody = z.infer<typeof mapCreateLandmarkBodySchema>;
 export type MapUpdateLandmarkBody = z.infer<typeof mapUpdateLandmarkBodySchema>;
+export type MapAnchorNearbyQuery = z.infer<typeof mapAnchorNearbyQuerySchema>;
 export type MapContributionsCreateBody = z.infer<typeof mapContributionsCreateBodySchema>;
 export type MapContributionsListQuery = z.infer<typeof mapContributionsListQuerySchema>;
