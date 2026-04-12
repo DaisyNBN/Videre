@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NavRequest, NavResponse, Obstacle } from "../types";
 import { getFallbackResponse } from "../fallback";
+require("dotenv").config();
 
 const GEMINI_TIMEOUT_MS = 3000;
 
@@ -16,11 +17,11 @@ function buildPrompt(
     obstacles.length === 0
       ? "No obstacles detected."
       : obstacles
-          .map(
-            (o) =>
-              `- ${o.label}: ${o.distance_estimate} distance, on the ${o.position}`
-          )
-          .join("\n");
+        .map(
+          (o) =>
+            `- ${o.label}: ${o.distance_estimate} distance, on the ${o.position}`
+        )
+        .join("\n");
 
   const checkpointDesc = checkpoint
     ? `Next checkpoint: ${checkpoint.label}, approximately ${checkpoint.distance} meters ahead.`
