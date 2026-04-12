@@ -573,6 +573,19 @@ function toCheckpointSummary(
   };
 }
 
+function resolveSpokenCheckpointLabel(label: string | undefined): string | undefined {
+  const normalized = label?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (/^node-\d+$/i.test(normalized)) {
+    return undefined;
+  }
+
+  return normalized;
+}
+
 function buildDeterministicRouteResponse(
   request: NavRequest,
   checkpointContext?: CheckpointContext,
@@ -647,6 +660,7 @@ function buildDeterministicRouteResponse(
 
   const remainingDistance = checkpointContext.target.distance;
   const roundedDistance = Math.max(0, Math.round(remainingDistance));
+  const spokenTargetLabel = resolveSpokenCheckpointLabel(checkpointContext.target.label);
   const absHeadingDelta = typeof checkpointContext.headingDeltaDegrees === "number"
     ? Math.abs(checkpointContext.headingDeltaDegrees)
     : undefined;
@@ -661,9 +675,13 @@ function buildDeterministicRouteResponse(
             ? "on your right"
             : "on your left"
         : "nearby";
-    instruction = `${turnPrompt}. ${checkpointContext.target.label} should be ${sideCue}.`;
+    instruction = spokenTargetLabel
+      ? `${turnPrompt}. ${spokenTargetLabel} should be ${sideCue}.`
+      : `${turnPrompt}. The next point should be ${sideCue}.`;
   } else {
-    instruction = `${turnPrompt}. Continue about ${roundedDistance} meters toward ${checkpointContext.target.label}.`;
+    instruction = spokenTargetLabel
+      ? `${turnPrompt}. Continue about ${roundedDistance} meters toward ${spokenTargetLabel}.`
+      : `${turnPrompt}. Continue about ${roundedDistance} meters.`;
   }
 
   return {
