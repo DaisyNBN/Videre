@@ -12,11 +12,74 @@ import { analyzeImageWithGeminiVision } from "./geminiVision";
 const GEMINI_TIMEOUT_MS = 3000;
 const IMAGE_ANALYSIS_TIMEOUT_MS = 5000;
 const SPARSE_IMAGE_DETECTION_THRESHOLD = 2;
+const GEMINI_NAV_MIN_COOLDOWN_MS = 60_000;
 let visionClient: ImageAnnotatorClient | null = null;
 let visionUnavailableReason: string | null = null;
+let geminiNavBlockedUntil = 0;
+let geminiNavLastLoggedAt = 0;
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
+
+function getErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+
+  const maybeStatus = (error as { status?: unknown }).status;
+  return typeof maybeStatus === "number" ? maybeStatus : null;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "Unknown Gemini error";
+}
+
+function isGeminiQuotaError(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  if (status === 429) {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return /too many requests|quota exceeded|rate limit|429/i.test(message);
+}
+
+function parseRetryDelayMs(error: unknown): number | null {
+  if (error && typeof error === "object") {
+    const details = (error as { errorDetails?: unknown }).errorDetails;
+    if (Array.isArray(details)) {
+      for (const item of details) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+
+        const retryDelay = (item as { retryDelay?: unknown }).retryDelay;
+        if (typeof retryDelay === "string") {
+          const secondsMatch = retryDelay.match(/([0-9]+(?:\.[0-9]+)?)s/i);
+          if (secondsMatch) {
+            return Math.ceil(Number(secondsMatch[1]) * 1000);
+          }
+        }
+      }
+    }
+  }
+
+  const message = getErrorMessage(error);
+  const retryInMatch = message.match(/retry\s+in\s+([0-9]+(?:\.[0-9]+)?)s/i);
+  if (retryInMatch) {
+    return Math.ceil(Number(retryInMatch[1]) * 1000);
+  }
+
+  return null;
+}
 
 function hasVisionCredentialHint(): boolean {
   const explicitPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -151,6 +214,10 @@ export async function getGeminiNavResponse(
   request: NavRequest,
   checkpoint?: { label: string; distance: number }
 ): Promise<NavResponse> {
+  if (Date.now() < geminiNavBlockedUntil) {
+    return getFallbackResponse(request.obstacles, checkpoint);
+  }
+
   try {
     if (!genAI) {
       throw new Error("Missing GEMINI_API_KEY");
@@ -187,8 +254,20 @@ export async function getGeminiNavResponse(
 
     return response;
   } catch (err) {
-    // Fix 2: Gemini failed or timed out — fallback keeps the user safe
-    console.error("Gemini error, using fallback:", err);
+    if (isGeminiQuotaError(err)) {
+      const retryDelay = parseRetryDelayMs(err) ?? GEMINI_NAV_MIN_COOLDOWN_MS;
+      geminiNavBlockedUntil = Date.now() + Math.max(retryDelay, GEMINI_NAV_MIN_COOLDOWN_MS);
+
+      if (Date.now() - geminiNavLastLoggedAt > 5_000) {
+        geminiNavLastLoggedAt = Date.now();
+        console.warn(
+          `Gemini navigation temporarily paused due to quota limits. Cooldown: ${Math.ceil((geminiNavBlockedUntil - Date.now()) / 1000)}s`,
+        );
+      }
+    } else {
+      console.warn(`Gemini navigation fallback triggered: ${getErrorMessage(err)}`);
+    }
+
     return getFallbackResponse(request.obstacles, checkpoint);
   }
 }
@@ -458,7 +537,12 @@ export async function analyzeImageWithVision(
       ),
     };
   } catch (err) {
-    console.error("Gemini image fallback failed:", err);
+    if (isGeminiQuotaError(err)) {
+      console.warn("Gemini image fallback skipped due to quota exhaustion.");
+    } else {
+      console.warn(`Gemini image fallback failed: ${getErrorMessage(err)}`);
+    }
+
     return {
       landmarks: visionLandmarks,
       obstacles: visionObstacles,

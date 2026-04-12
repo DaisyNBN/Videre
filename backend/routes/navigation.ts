@@ -4,6 +4,7 @@ import { validateBody } from "../src/middleware/validate";
 import logger from "../src/services/logger";
 import {
   generateNavigationRoute,
+  generateNavigationRouteFromCoordinates,
   getNavigationInstruction,
   NavigationError,
   rerouteNavigation,
@@ -15,7 +16,9 @@ import {
   navigationRerouteBodySchema,
   NavigationRerouteBody,
   navigationRouteBodySchema,
+  navigationRouteFromCoordinatesBodySchema,
   NavigationRouteBody,
+  NavigationRouteFromCoordinatesBody,
 } from "../src/schemas/navigation";
 
 const router = Router();
@@ -60,6 +63,32 @@ router.post(
   "/instructions",
   validateBody(navigationInstructionBodySchema),
   handleInstructionRequest,
+);
+
+router.post(
+  "/routes/from-coordinates",
+  validateBody(navigationRouteFromCoordinatesBodySchema),
+  async (req: Request, res: Response) => {
+    const body = req.body as NavigationRouteFromCoordinatesBody;
+
+    try {
+      const route = await generateNavigationRouteFromCoordinates({
+        mapId: body.mapId,
+        start: body.start,
+        end: body.end,
+        blockedNodeIds: body.blockedNodeIds,
+      });
+
+      return res.status(201).json(new ApiResponse(true, "Route generated from coordinates", route));
+    } catch (err) {
+      if (err instanceof NavigationError) {
+        return res.status(err.statusCode).json(new ApiResponse(false, err.message));
+      }
+
+      logger.error("Navigation route generation from coordinates error: %o", err);
+      return res.status(500).json(new ApiResponse(false, "Failed to generate route from coordinates"));
+    }
+  },
 );
 
 router.post("/routes", validateBody(navigationRouteBodySchema), async (req: Request, res: Response) => {

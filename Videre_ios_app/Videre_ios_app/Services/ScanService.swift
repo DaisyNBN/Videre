@@ -445,21 +445,57 @@ class ScanService: NSObject, ObservableObject {
             }
 
             let graph = try await APIService.shared.fetchMapGraph(mapId: mapId)
-            guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
-                finalStatus = "Map created, but graph has insufficient nodes for routing"
-                await MainActor.run {
-                    uploadStatus = finalStatus
-                    isUploading = false
-                    sequenceNumber += 1
-                }
-                return
-            }
+            let routeId: String
+            if let coordinatePair = selectRouteCoordinates(from: points) {
+                do {
+                    routeId = try await APIService.shared.generateRouteFromCoordinates(
+                        mapId: mapId,
+                        startX: coordinatePair.start.x,
+                        startY: coordinatePair.start.y,
+                        startZ: coordinatePair.start.z,
+                        endX: coordinatePair.end.x,
+                        endY: coordinatePair.end.y,
+                        endZ: coordinatePair.end.z
+                    )
+                } catch {
+                    guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
+                        finalStatus = "Map created, but graph has insufficient nodes for routing"
+                        await MainActor.run {
+                            uploadStatus = finalStatus
+                            isUploading = false
+                            sequenceNumber += 1
+                        }
+                        return
+                    }
 
-            let routeId = try await APIService.shared.generateRoute(
-                mapId: mapId,
-                startNodeId: startNodeId,
-                endNodeId: endNodeId
-            )
+                    await MainActor.run {
+                        uploadStatus =
+                            "Coordinate route failed, falling back to node route: \(error.localizedDescription)"
+                    }
+
+                    routeId = try await APIService.shared.generateRoute(
+                        mapId: mapId,
+                        startNodeId: startNodeId,
+                        endNodeId: endNodeId
+                    )
+                }
+            } else {
+                guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
+                    finalStatus = "Map created, but graph has insufficient nodes for routing"
+                    await MainActor.run {
+                        uploadStatus = finalStatus
+                        isUploading = false
+                        sequenceNumber += 1
+                    }
+                    return
+                }
+
+                routeId = try await APIService.shared.generateRoute(
+                    mapId: mapId,
+                    startNodeId: startNodeId,
+                    endNodeId: endNodeId
+                )
+            }
 
             await MainActor.run {
                 backendRouteId = routeId
@@ -502,6 +538,52 @@ class ScanService: NSObject, ObservableObject {
         }
 
         return nil
+    }
+
+    private func selectRouteCoordinates(
+            from points: [TrajectoryPoint],
+            minimumDistanceMeters: Float = 1.0
+    ) -> (
+        start: (x: Double, y: Double, z: Double),
+        end: (x: Double, y: Double, z: Double)
+    )? {
+        guard let startPoint = points.first else {
+            return nil
+        }
+
+        let start = (
+            x: Double(startPoint.x),
+            y: Double(startPoint.y),
+            z: Double(startPoint.z)
+        )
+
+        let endCandidate = points.reversed().first { point in
+            let dx = point.x - startPoint.x
+            let dy = point.y - startPoint.y
+            let dz = point.z - startPoint.z
+            let distance = sqrt((dx * dx) + (dy * dy) + (dz * dz))
+            return distance >= minimumDistanceMeters
+        } ?? points.last
+
+        guard let endPoint = endCandidate else {
+            return nil
+        }
+
+        let end = (
+            x: Double(endPoint.x),
+            y: Double(endPoint.y),
+            z: Double(endPoint.z)
+        )
+
+        let dx = endPoint.x - startPoint.x
+        let dy = endPoint.y - startPoint.y
+        let dz = endPoint.z - startPoint.z
+        let distance = sqrt((dx * dx) + (dy * dy) + (dz * dz))
+        guard distance > 0.05 else {
+            return nil
+        }
+
+        return (start: start, end: end)
     }
 
     @MainActor

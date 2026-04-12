@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { createHash } from "crypto";
 import { AIObjectDetection, LandmarkType } from "../types";
 
 type GeminiImageAnalysis = {
@@ -23,6 +24,106 @@ type GeminiImageAnalysis = {
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
+const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL ?? "gemini-2.5-flash-lite";
+const GEMINI_IMAGE_CACHE_MAX = 200;
+const GEMINI_IMAGE_MIN_COOLDOWN_MS = 60_000;
+
+let geminiImageQuotaBlockedUntil = 0;
+let geminiImageQuotaLastLoggedAt = 0;
+const geminiImageCache = new Map<string, GeminiImageAnalysis>();
+
+function getErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+
+  const maybeStatus = (error as { status?: unknown }).status;
+  return typeof maybeStatus === "number" ? maybeStatus : null;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "Unknown Gemini image error";
+}
+
+function isGeminiQuotaError(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  if (status === 429) {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return /too many requests|quota exceeded|rate limit|429/i.test(message);
+}
+
+function parseRetryDelayMs(error: unknown): number | null {
+  if (error && typeof error === "object") {
+    const details = (error as { errorDetails?: unknown }).errorDetails;
+    if (Array.isArray(details)) {
+      for (const item of details) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+
+        const retryDelay = (item as { retryDelay?: unknown }).retryDelay;
+        if (typeof retryDelay === "string") {
+          const secondsMatch = retryDelay.match(/([0-9]+(?:\.[0-9]+)?)s/i);
+          if (secondsMatch) {
+            return Math.ceil(Number(secondsMatch[1]) * 1000);
+          }
+        }
+      }
+    }
+  }
+
+  const message = getErrorMessage(error);
+  const retryInMatch = message.match(/retry\s+in\s+([0-9]+(?:\.[0-9]+)?)s/i);
+  if (retryInMatch) {
+    return Math.ceil(Number(retryInMatch[1]) * 1000);
+  }
+
+  return null;
+}
+
+function cacheKey(imageBase64: string, mimeType: string): string {
+  const hash = createHash("sha256").update(imageBase64).digest("hex");
+  return `${mimeType}:${hash}`;
+}
+
+function readFromCache(key: string): GeminiImageAnalysis | null {
+  const value = geminiImageCache.get(key);
+  if (!value) {
+    return null;
+  }
+
+  // Refresh insertion order for simple LRU behavior.
+  geminiImageCache.delete(key);
+  geminiImageCache.set(key, value);
+  return value;
+}
+
+function writeToCache(key: string, value: GeminiImageAnalysis): void {
+  if (geminiImageCache.has(key)) {
+    geminiImageCache.delete(key);
+  }
+
+  geminiImageCache.set(key, value);
+
+  while (geminiImageCache.size > GEMINI_IMAGE_CACHE_MAX) {
+    const oldestKey = geminiImageCache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    geminiImageCache.delete(oldestKey);
+  }
+}
 
 function stripCodeFence(text: string): string {
   return text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
@@ -210,16 +311,27 @@ export async function analyzeImageWithGeminiVision(
     return { landmarks: [], obstacles: [] };
   }
 
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+  if (Date.now() < geminiImageQuotaBlockedUntil) {
+    return { landmarks: [], obstacles: [] };
+  }
 
-  const result = await model.generateContent([
-    {
-      inlineData: {
-        data: imageBase64,
-        mimeType,
+  const key = cacheKey(imageBase64, mimeType);
+  const cached = readFromCache(key);
+  if (cached) {
+    return cached;
+  }
+
+  const model = genAI.getGenerativeModel({ model: GEMINI_IMAGE_MODEL });
+
+  try {
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          data: imageBase64,
+          mimeType,
+        },
       },
-    },
-    `You are analyzing a single indoor frame for blind-navigation assistance.
+      `You are analyzing a single indoor frame for blind-navigation assistance.
 Return ONLY valid JSON (no markdown, no backticks) with this exact shape:
 {
   "landmarks": [
@@ -242,12 +354,31 @@ Rules:
 - Prioritize doors, stairs, elevators, exits, walls, people, chairs, tables, barriers, clutter.
 - If uncertain, still return best-effort entries with lower confidence.
 - Never output non-JSON text.`,
-  ]);
+    ]);
 
-  const text = result.response.text();
-  const cleaned = stripCodeFence(text);
-  const parsed = JSON.parse(cleaned);
-  return normalizeGeminiImageAnalysis(parsed);
+    const text = result.response.text();
+    const cleaned = stripCodeFence(text);
+    const parsed = JSON.parse(cleaned);
+    const normalized = normalizeGeminiImageAnalysis(parsed);
+    writeToCache(key, normalized);
+    return normalized;
+  } catch (error) {
+    if (isGeminiQuotaError(error)) {
+      const retryDelay = parseRetryDelayMs(error) ?? GEMINI_IMAGE_MIN_COOLDOWN_MS;
+      geminiImageQuotaBlockedUntil = Date.now() + Math.max(retryDelay, GEMINI_IMAGE_MIN_COOLDOWN_MS);
+
+      if (Date.now() - geminiImageQuotaLastLoggedAt > 5_000) {
+        geminiImageQuotaLastLoggedAt = Date.now();
+        console.warn(
+          `Gemini image fallback temporarily paused due to quota limits. Cooldown: ${Math.ceil((geminiImageQuotaBlockedUntil - Date.now()) / 1000)}s`,
+        );
+      }
+
+      return { landmarks: [], obstacles: [] };
+    }
+
+    throw error;
+  }
 }
 
 export async function detectObjectsInImage(

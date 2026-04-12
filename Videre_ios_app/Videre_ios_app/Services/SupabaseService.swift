@@ -1057,6 +1057,91 @@ final class APIService {
         return routeId
     }
 
+    func generateRouteFromCoordinates(
+            mapId: String,
+            startX: Double,
+            startY: Double,
+            startZ: Double,
+            endX: Double,
+            endY: Double,
+            endZ: Double,
+            blockedNodeIds: [String] = []
+    ) async throws -> String {
+        let payload: [String: Any] = [
+            "mapId": mapId,
+            "start": [
+                "x": startX,
+                "y": startY,
+                "z": startZ,
+            ],
+            "end": [
+                "x": endX,
+                "y": endY,
+                "z": endZ,
+            ],
+            "blockedNodeIds": blockedNodeIds,
+        ]
+
+        if Constants.apiDryRun {
+            print("POST \(apiBaseURL)/navigation/routes/from-coordinates")
+            print(Self.jsonBlock(payload))
+            let dryRouteId = "dry-route-coords-\(mapId)"
+            let fallbackNodes = Array(cachedMapNodesById.keys.prefix(2))
+            let startNodeId = fallbackNodes.first ?? "start-node"
+            let endNodeId = (fallbackNodes.last ?? fallbackNodes.first) ?? "end-node"
+            cachedRouteNodeIds = [startNodeId, endNodeId].filter { !$0.isEmpty }
+            setActiveRouteContext(
+                mapId: mapId,
+                routeId: dryRouteId,
+                startNodeId: startNodeId,
+                endNodeId: endNodeId
+            )
+            return dryRouteId
+        }
+
+        let response = try await requestJSON(
+            path: "/navigation/routes/from-coordinates",
+            method: "POST",
+            payload: payload
+        )
+        let data = try extractApiData(response)
+
+        guard let routeId = stringValue(data["routeId"]), !routeId.isEmpty else {
+            throw NSError(
+                domain: "APIService",
+                code: 10,
+                userInfo: [NSLocalizedDescriptionKey: "Coordinate route response missing route id"]
+            )
+        }
+
+        let startNodeId = stringValue(data["startNodeId"])
+            ?? stringValue(data["start_node_id"])
+            ?? ""
+        let endNodeId = stringValue(data["endNodeId"])
+            ?? stringValue(data["end_node_id"])
+            ?? ""
+
+        guard !startNodeId.isEmpty, !endNodeId.isEmpty else {
+            throw NSError(
+                domain: "APIService",
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "Coordinate route response missing resolved start/end nodes"]
+            )
+        }
+
+        let routeNodeIds = (data["nodeIds"] as? [String])?.filter { !$0.isEmpty } ?? []
+        cachedRouteNodeIds = routeNodeIds.isEmpty ? [startNodeId, endNodeId] : routeNodeIds
+
+        setActiveRouteContext(
+            mapId: mapId,
+            routeId: routeId,
+            startNodeId: startNodeId,
+            endNodeId: endNodeId
+        )
+
+        return routeId
+    }
+
     func rerouteActiveRoute(
             reason: String,
             obstacleNodeIds: [String] = [],
