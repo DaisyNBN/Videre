@@ -40,6 +40,7 @@ function buildInstructionRequest(body: NavigationInstructionBody): NavRequest {
       body.heading_degrees ?? body.headingDegrees ?? 0,
     obstacles: body.obstacles,
     speed: body.speed,
+    speed_mps: body.speed_mps ?? body.speedMps,
   };
 }
 

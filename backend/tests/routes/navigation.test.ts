@@ -118,6 +118,38 @@ describe("navigation routes", () => {
         );
     });
 
+    it("accepts speedMps in instructions payload", async () => {
+        mockGetNavigationInstruction.mockResolvedValue({
+            instruction: "Slight right",
+            urgency: "medium",
+            haptic_pattern: "double_tap",
+            next_checkpoint: "Room 204",
+            distance_to_next_m: 5,
+            fallback_used: true,
+        });
+
+        const app = createApp();
+
+        const response = await request(app)
+            .post("/api/navigation/instructions")
+            .send({
+                routeId: "route-123",
+                location: { lat: 12.1, lng: 34.2 },
+                headingDegrees: 90,
+                speed: "walking",
+                speedMps: 1.35,
+                obstacles: [],
+            });
+
+        expect(response.status).toBe(200);
+        expect(response.body.success).toBe(true);
+        expect(mockGetNavigationInstruction).toHaveBeenCalledWith(
+            expect.objectContaining({
+                speed_mps: 1.35,
+            }),
+        );
+    });
+
     it("returns 400 for invalid instructions payload", async () => {
         const app = createApp();
 

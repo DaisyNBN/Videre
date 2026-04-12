@@ -23,6 +23,7 @@ final class NavigationContextService: NSObject, ObservableObject {
     @Published private(set) var longitude: Double = NavigationContextService.defaultLng
     /// Degrees 0–360, or 0 if unknown.
     @Published private(set) var headingDegrees: Double = 0
+    @Published private(set) var speedMetersPerSecond: Double = 0
     @Published private(set) var locationAuthorized = false
     @Published private(set) var nearbyHazardsCount = 0
     @Published private(set) var hazardPollStatus = ""
@@ -36,6 +37,7 @@ final class NavigationContextService: NSObject, ObservableObject {
     private var cachedHazardObstacles: [[String: Any]] = []
     private var lastHazardSignature: String = ""
     private var isRerouteInFlight = false
+    private var lastCompassHeadingUpdateAt: Date = .distantPast
     private var walkCoordinateTrail: [WalkCoordinateSample] = []
     private var lastWalkCoordinateSampleAt: Date = .distantPast
     private let walkCoordinateSampleInterval: TimeInterval = 1.2
@@ -99,7 +101,8 @@ final class NavigationContextService: NSObject, ObservableObject {
             "map_position":    mapPosition,
             "heading_degrees": headingDegrees,
             "obstacles":       obstacles,
-            "speed":           speed
+            "speed":           speed,
+            "speed_mps":       speedMetersPerSecond
         ]
     }
 
@@ -372,8 +375,12 @@ extension NavigationContextService: CLLocationManagerDelegate {
         DispatchQueue.main.async {
             self.latitude  = loc.coordinate.latitude
             self.longitude = loc.coordinate.longitude
-            // Valid course = direction of travel; invalid stays on compass heading.
-            if loc.course >= 0 {
+            self.speedMetersPerSecond = max(0, loc.speed)
+
+            // Use GPS course only as fallback when compass heading has not updated
+            // recently and the user is actually moving.
+            let compassIsStale = Date().timeIntervalSince(self.lastCompassHeadingUpdateAt) > 4
+            if compassIsStale && loc.course >= 0 && loc.speed > 0.8 {
                 self.headingDegrees = loc.course
             }
         }
@@ -392,6 +399,7 @@ extension NavigationContextService: CLLocationManagerDelegate {
             : newHeading.magneticHeading
         DispatchQueue.main.async {
             self.headingDegrees = v
+            self.lastCompassHeadingUpdateAt = Date()
         }
     }
 

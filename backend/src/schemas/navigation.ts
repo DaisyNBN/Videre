@@ -27,6 +27,8 @@ export const navigationInstructionBodySchema = z.object({
     headingDegrees: z.number().finite().optional(),
     obstacles: z.array(obstacleSchema).optional().default([]),
     speed: z.enum(["walking", "stopped"]).optional().default("walking"),
+    speed_mps: z.number().finite().nonnegative().optional(),
+    speedMps: z.number().finite().nonnegative().optional(),
 });
 
 export const navigationRouteBodySchema = z.object({

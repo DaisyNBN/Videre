@@ -14,6 +14,7 @@ export type NavRequest = {
   heading_degrees: number;
   obstacles: Obstacle[];
   speed: "walking" | "stopped";
+  speed_mps?: number;
 }
 
 export type Obstacle = {

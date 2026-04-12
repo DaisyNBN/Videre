@@ -46,12 +46,147 @@ type RouteCheckpointRow = {
   order_num: number;
 };
 
+type RouteCheckpointCacheEntry = {
+  checkpoints: RouteCheckpointRow[];
+  cachedAtMs: number;
+};
+
+type CheckpointContext = {
+  nearest: { label: string; distance: number; order: number };
+  target: { label: string; distance: number; order: number; x: number; y: number };
+  headingDeltaDegrees?: number;
+};
+
+type AdaptiveTurnThresholds = {
+  straightDegrees: number;
+  slightTurnDegrees: number;
+  sharpTurnDegrees: number;
+  checkpointAdvanceDistanceM: number;
+};
+
+const ROUTE_CHECKPOINT_CACHE_TTL_MS = 5_000;
+const ROUTE_CHECKPOINT_CACHE_MAX_ENTRIES = 256;
+const BASE_CHECKPOINT_ADVANCE_DISTANCE_M = 1.0;
+const BASE_HEADING_STRAIGHT_DEGREES = 18;
+const BASE_HEADING_SLIGHT_TURN_DEGREES = 50;
+const BASE_HEADING_SHARP_TURN_DEGREES = 120;
+
+const routeCheckpointCache = new Map<string, RouteCheckpointCacheEntry>();
+
 export type GenerateRouteRequest = {
   mapId: string;
   startNodeId: string;
   endNodeId: string;
   blockedNodeIds?: string[];
 };
+
+function clampHeadingDelta(degrees: number): number {
+  let delta = degrees;
+  while (delta > 180) {
+    delta -= 360;
+  }
+  while (delta <= -180) {
+    delta += 360;
+  }
+  return delta;
+}
+
+function clamp(value: number, lower: number, upper: number): number {
+  return Math.max(lower, Math.min(upper, value));
+}
+
+function resolveMovementSpeedMps(request: NavRequest): number {
+  if (typeof request.speed_mps === "number" && Number.isFinite(request.speed_mps)) {
+    return clamp(request.speed_mps, 0, 3);
+  }
+
+  return request.speed === "walking" ? 1.0 : 0.15;
+}
+
+function resolveAdaptiveTurnThresholds(speedMps: number): AdaptiveTurnThresholds {
+  const fastFactor = clamp((speedMps - 0.2) / 1.6, 0, 1);
+  const slowFactor = clamp((0.4 - speedMps) / 0.4, 0, 1);
+
+  const straightDegrees =
+    BASE_HEADING_STRAIGHT_DEGREES - (fastFactor * 5) + (slowFactor * 4);
+  const slightTurnDegrees =
+    BASE_HEADING_SLIGHT_TURN_DEGREES - (fastFactor * 10) + (slowFactor * 8);
+  const sharpTurnDegrees =
+    BASE_HEADING_SHARP_TURN_DEGREES - (fastFactor * 12) + (slowFactor * 8);
+
+  const checkpointAdvanceDistanceM = clamp(
+    BASE_CHECKPOINT_ADVANCE_DISTANCE_M + (fastFactor * 0.9) - (slowFactor * 0.35),
+    0.65,
+    2.2,
+  );
+
+  return {
+    straightDegrees,
+    slightTurnDegrees,
+    sharpTurnDegrees,
+    checkpointAdvanceDistanceM,
+  };
+}
+
+function bearingDegreesFromMapVector(
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+): number | undefined {
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) {
+    return undefined;
+  }
+
+  const radians = Math.atan2(dy, dx);
+  const degrees = (radians * 180) / Math.PI;
+  return (degrees + 360) % 360;
+}
+
+async function loadRouteCheckpoints(routeId: string): Promise<RouteCheckpointRow[]> {
+  const now = Date.now();
+  const cached = routeCheckpointCache.get(routeId);
+  if (cached && now - cached.cachedAtMs <= ROUTE_CHECKPOINT_CACHE_TTL_MS) {
+    return cached.checkpoints;
+  }
+
+  const { data: checkpoints, error } = await supabase
+    .from("route_checkpoints")
+    .select("label, lat, lng, order_num")
+    .eq("route_id", routeId)
+    .order("order_num", { ascending: true });
+
+  if (error) {
+    if (isUndefinedTableOrColumn(error)) {
+      logger.warn(
+        "route_checkpoints schema unavailable for nearest-checkpoint lookup.",
+      );
+      return [];
+    }
+
+    logger.warn("Failed to fetch route checkpoints for nearest checkpoint: %o", error);
+    return [];
+  }
+
+  const rows = (checkpoints ?? []) as RouteCheckpointRow[];
+  routeCheckpointCache.set(routeId, {
+    checkpoints: rows,
+    cachedAtMs: now,
+  });
+
+  if (routeCheckpointCache.size > ROUTE_CHECKPOINT_CACHE_MAX_ENTRIES) {
+    const oldest = routeCheckpointCache.entries().next().value as
+      | [string, RouteCheckpointCacheEntry]
+      | undefined;
+    if (oldest) {
+      routeCheckpointCache.delete(oldest[0]);
+    }
+  }
+
+  return rows;
+}
 
 export type GenerateRouteFromCoordinatesRequest = {
   mapId: string;
@@ -288,6 +423,20 @@ async function persistRouteCheckpoints(
   routeId: string,
   checkpoints: RouteCheckpointRow[],
 ): Promise<"persisted" | "in-memory"> {
+  routeCheckpointCache.set(routeId, {
+    checkpoints,
+    cachedAtMs: Date.now(),
+  });
+
+  if (routeCheckpointCache.size > ROUTE_CHECKPOINT_CACHE_MAX_ENTRIES) {
+    const oldest = routeCheckpointCache.entries().next().value as
+      | [string, RouteCheckpointCacheEntry]
+      | undefined;
+    if (oldest) {
+      routeCheckpointCache.delete(oldest[0]);
+    }
+  }
+
   if (checkpoints.length === 0) {
     return "in-memory";
   }
@@ -321,46 +470,164 @@ async function persistRouteCheckpoints(
   return "persisted";
 }
 
-async function getNearestCheckpoint(
+async function getCheckpointContext(
   routeId: string,
   location: { lat: number; lng: number },
   mapPosition?: { x: number; y: number; z?: number },
-): Promise<{ label: string; distance: number } | undefined> {
-  const { data: checkpoints, error } = await supabase
-    .from("route_checkpoints")
-    .select("label, lat, lng, order_num")
-    .eq("route_id", routeId)
-    .order("order_num", { ascending: true });
-
-  if (error) {
-    if (isUndefinedTableOrColumn(error)) {
-      logger.warn(
-        "route_checkpoints schema unavailable for nearest-checkpoint lookup.",
-      );
-      return undefined;
-    }
-
-    logger.warn("Failed to fetch route checkpoints for nearest checkpoint: %o", error);
+  headingDegrees?: number,
+  checkpointAdvanceDistanceM: number = BASE_CHECKPOINT_ADVANCE_DISTANCE_M,
+): Promise<CheckpointContext | undefined> {
+  const checkpoints = await loadRouteCheckpoints(routeId);
+  if (checkpoints.length === 0) {
     return undefined;
   }
 
-  let nearest: { label: string; distance: number } | undefined;
+  const distanceForCheckpoint = (checkpoint: RouteCheckpointRow): number => {
+    if (typeof mapPosition?.x === "number" && typeof mapPosition?.y === "number") {
+      return Math.hypot(checkpoint.lat - mapPosition.x, checkpoint.lng - mapPosition.y);
+    }
 
-  if (checkpoints && checkpoints.length > 0) {
-    let minDist = Number.POSITIVE_INFINITY;
-    for (const cp of checkpoints) {
-      const dist =
-        typeof mapPosition?.x === "number" && typeof mapPosition?.y === "number"
-          ? Math.hypot(cp.lat - mapPosition.x, cp.lng - mapPosition.y)
-          : haversineMeters(location.lat, location.lng, cp.lat, cp.lng);
-      if (dist < minDist) {
-        minDist = dist;
-        nearest = { label: cp.label, distance: Math.round(dist) };
-      }
+    return haversineMeters(location.lat, location.lng, checkpoint.lat, checkpoint.lng);
+  };
+
+  let nearestIndex = 0;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < checkpoints.length; i += 1) {
+    const distance = distanceForCheckpoint(checkpoints[i]);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = i;
     }
   }
 
-  return nearest;
+  let targetIndex = nearestIndex;
+  if (
+    typeof mapPosition?.x === "number" &&
+    typeof mapPosition?.y === "number" &&
+    nearestDistance <= checkpointAdvanceDistanceM &&
+    nearestIndex < checkpoints.length - 1
+  ) {
+    targetIndex = nearestIndex + 1;
+  }
+
+  const nearest = checkpoints[nearestIndex];
+  const target = checkpoints[targetIndex];
+  const targetDistance = distanceForCheckpoint(target);
+
+  let headingDeltaDegrees: number | undefined;
+  if (
+    typeof headingDegrees === "number" &&
+    Number.isFinite(headingDegrees) &&
+    typeof mapPosition?.x === "number" &&
+    typeof mapPosition?.y === "number"
+  ) {
+    const desiredHeading = bearingDegreesFromMapVector(
+      mapPosition.x,
+      mapPosition.y,
+      target.lat,
+      target.lng,
+    );
+
+    if (typeof desiredHeading === "number") {
+      headingDeltaDegrees = clampHeadingDelta(desiredHeading - headingDegrees);
+    }
+  }
+
+  return {
+    nearest: {
+      label: nearest.label,
+      distance: Number(nearestDistance.toFixed(2)),
+      order: nearest.order_num,
+    },
+    target: {
+      label: target.label,
+      distance: Number(targetDistance.toFixed(2)),
+      order: target.order_num,
+      x: target.lat,
+      y: target.lng,
+    },
+    headingDeltaDegrees,
+  };
+}
+
+function toCheckpointSummary(
+  checkpointContext?: CheckpointContext,
+): { label: string; distance: number } | undefined {
+  if (!checkpointContext) {
+    return undefined;
+  }
+
+  return {
+    label: checkpointContext.target.label,
+    distance: Math.max(0, Math.round(checkpointContext.target.distance)),
+  };
+}
+
+function buildDeterministicRouteResponse(
+  request: NavRequest,
+  checkpointContext?: CheckpointContext,
+): NavResponse {
+  const movementSpeedMps = resolveMovementSpeedMps(request);
+  const thresholds = resolveAdaptiveTurnThresholds(movementSpeedMps);
+  const checkpointSummary = toCheckpointSummary(checkpointContext);
+  const blocking = request.obstacles.find(
+    (obstacle) => obstacle.distance_estimate === "near" && obstacle.position === "center",
+  );
+  if (blocking) {
+    return getFallbackResponse(request.obstacles, checkpointSummary);
+  }
+
+  const nearbyObstacle = request.obstacles.find(
+    (obstacle) => obstacle.distance_estimate === "near",
+  );
+  if (nearbyObstacle) {
+    return getFallbackResponse(request.obstacles, checkpointSummary);
+  }
+
+  if (!checkpointContext) {
+    return getFallbackResponse(request.obstacles, undefined);
+  }
+
+  let urgency: NavResponse["urgency"] = "low";
+  let hapticPattern: NavResponse["haptic_pattern"] = "single_tap";
+  let turnPrompt = "Continue straight";
+
+  if (typeof checkpointContext.headingDeltaDegrees === "number") {
+    const delta = checkpointContext.headingDeltaDegrees;
+    const absDelta = Math.abs(delta);
+
+    if (absDelta <= thresholds.straightDegrees) {
+      turnPrompt = "Continue straight";
+    } else if (absDelta <= thresholds.slightTurnDegrees) {
+      turnPrompt = delta > 0 ? "Slight right" : "Slight left";
+      urgency = "medium";
+      hapticPattern = "double_tap";
+    } else if (absDelta <= thresholds.sharpTurnDegrees) {
+      turnPrompt = delta > 0 ? "Turn right" : "Turn left";
+      urgency = "medium";
+      hapticPattern = "double_tap";
+    } else {
+      turnPrompt = delta > 0 ? "Turn around to your right" : "Turn around to your left";
+      urgency = "high";
+      hapticPattern = "continuous";
+    }
+  }
+
+  const roundedDistance = Math.max(0, Math.round(checkpointContext.target.distance));
+  const instruction =
+    roundedDistance <= 1
+      ? `${turnPrompt}. You are at ${checkpointContext.target.label}.`
+      : `${turnPrompt}. ${checkpointContext.target.label} in about ${roundedDistance} meters.`;
+
+  return {
+    instruction,
+    urgency,
+    haptic_pattern: hapticPattern,
+    next_checkpoint: checkpointContext.target.label,
+    distance_to_next_m: Number(checkpointContext.target.distance.toFixed(1)),
+    fallback_used: true,
+  };
 }
 
 function distanceToNode(
@@ -692,18 +959,31 @@ export async function rerouteNavigation(
 export async function getNavigationInstruction(
   request: NavRequest
 ): Promise<NavResponse> {
-  const nearest = request.route_id
-    ? await getNearestCheckpoint(request.route_id, request.location, request.map_position)
-    : undefined;
+  const movementSpeedMps = resolveMovementSpeedMps(request);
+  const adaptiveThresholds = resolveAdaptiveTurnThresholds(movementSpeedMps);
 
-  let response: NavResponse = getFallbackResponse(request.obstacles, nearest);
+  const checkpointContext = request.route_id
+    ? await getCheckpointContext(
+      request.route_id,
+      request.location,
+      request.map_position,
+      request.heading_degrees,
+      adaptiveThresholds.checkpointAdvanceDistanceM,
+    )
+    : undefined;
+  const checkpointSummary = toCheckpointSummary(checkpointContext);
+
+  let response: NavResponse = buildDeterministicRouteResponse(
+    request,
+    checkpointContext,
+  );
 
   if (USE_GEMINI_NAVIGATION) {
     try {
-      response = await getGeminiNavResponse(request, nearest);
+      response = await getGeminiNavResponse(request, checkpointSummary);
     } catch (err) {
       logger.error("Gemini failed in navigation pipeline: %o", err);
-      response = getFallbackResponse(request.obstacles, nearest);
+      response = buildDeterministicRouteResponse(request, checkpointContext);
     }
   }
 

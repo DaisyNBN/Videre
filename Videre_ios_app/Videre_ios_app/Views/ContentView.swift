@@ -31,8 +31,8 @@ struct ContentView: View {
     @State private var localizationStatusMessage: String = ""
     @State private var localizationWarningActive: Bool = false
     @State private var lastLocalizationWarningSpokenAt: Date = .distantPast
-    private let autoGuidanceTimer = Timer.publish(every: 4.0, on: .main, in: .common).autoconnect()
-    private let guidanceThrottleInterval: TimeInterval = 2.5
+    private let autoGuidanceTimer = Timer.publish(every: 1.2, on: .main, in: .common).autoconnect()
+    private let guidanceThrottleInterval: TimeInterval = 0.9
     private let recentDestinationsStorageKey = "videre.recentDestinations"
     private let maxRecentDestinations = 3
     private let repeatedGuidanceSpeechInterval: TimeInterval = 8.0
@@ -930,7 +930,7 @@ struct ContentView: View {
             return "Auto guidance requesting update..."
         }
 
-        return "Auto guidance active (every 4s, throttled)"
+        return "Auto guidance active (~1.2s cadence, throttled)"
     }
 
     private func requestBackendGuidance(force: Bool) {
