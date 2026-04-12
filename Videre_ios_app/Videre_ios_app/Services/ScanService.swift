@@ -54,10 +54,12 @@ class ScanService: NSObject, ObservableObject {
     private let meshLandmarkInterval: TimeInterval = 2.0
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
-    /// Rotation threshold to trigger new keyframe: 15 degrees.
-    private let rotationThresholdDegrees: Float = 15.0
+    /// Rotation threshold to trigger new keyframe: 90 degrees.
+    private let rotationThresholdDegrees: Float = 90.0
     /// Position change threshold: 0.5 meters.
     private let positionChangeThreshold: Float = 0.5
+    /// LiDAR distance threshold to trigger new keyframe: significant depth change.
+    private let lidarDistanceThreshold: Float = 0.3  // 30cm depth change
 
     /// Dedupe ARKit mesh landmarks (meters).
     private var arkitLandmarkCentroids: [simd_float3] = []
@@ -69,6 +71,8 @@ class ScanService: NSObject, ObservableObject {
     private var lastKeyframePosition: simd_float3 = .zero
     private var lastKeyframeRotation: simd_quatf = simd_quatf()
     private var lastKeyframeCacheClearTime: Date = Date()
+    private var lastKeyframeLidarDistance: Float = 999.0
+    private var currentLidarDistance: Float = 999.0
 
     // ── Start ─────────────────────────────────────────
     func startScan(
@@ -92,6 +96,8 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframePosition   = .zero
         lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
+        lastKeyframeLidarDistance = 999.0
+        currentLidarDistance = 999.0
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
@@ -146,6 +152,11 @@ class ScanService: NSObject, ObservableObject {
             t.columns.3.z
         )
 
+        // Get current LiDAR depth from frame if available
+        if let depthMap = frame.sceneDepth?.depthMap {
+            currentLidarDistance = getLidarCenterDistance(depthMap: depthMap)
+        }
+
         let now = frame.timestamp
 
         // Always record trajectory points for better LiDAR coverage
@@ -159,11 +170,13 @@ class ScanService: NSObject, ObservableObject {
         if shouldCaptureNewKeyframe(
             newPosition: currentPosition,
             newRotation: cameraRotation,
+            newLidarDistance: currentLidarDistance,
             lastTime: lastKeyframeTime,
             now: now) {
             lastKeyframeTime = now
             lastKeyframePosition = currentPosition
             lastKeyframeRotation = cameraRotation
+            lastKeyframeLidarDistance = currentLidarDistance
             captureKeyframe(frame: frame)
         }
 
@@ -188,6 +201,7 @@ class ScanService: NSObject, ObservableObject {
     private func shouldCaptureNewKeyframe(
             newPosition: simd_float3,
             newRotation: simd_quatf,
+            newLidarDistance: Float,
             lastTime: TimeInterval,
             now: TimeInterval) -> Bool {
         
@@ -196,12 +210,7 @@ class ScanService: NSObject, ObservableObject {
             return true
         }
 
-        // Check time-based fallback (every 5 seconds at most)
-        if now - lastTime >= KEYFRAME_INTERVAL {
-            return true
-        }
-
-        // Check rotation change (15 degrees threshold)
+        // Check rotation change (90 degrees threshold)
         let rotationDiff = rotationAngleDifference(
             lastKeyframeRotation,
             newRotation)
@@ -219,6 +228,30 @@ class ScanService: NSObject, ObservableObject {
             return true
         }
 
+        // Check LiDAR distance change (0.3 meters / 30cm threshold)
+        // Only check if both distances are valid
+        if newLidarDistance < 999.0 && lastKeyframeLidarDistance < 999.0 {
+            let lidarDiff = abs(newLidarDistance - lastKeyframeLidarDistance)
+            if lidarDiff >= lidarDistanceThreshold {
+                print("New keyframe: LiDAR depth changed by \(lidarDiff)m")
+                return true
+            }
+        }
+
+        // Check time-based fallback (every 5 seconds at most)
+        // AND check 5-hour cache expiration restriction
+        let cacheExpired = Date().timeIntervalSince(lastKeyframeCacheClearTime) >= imageCacheExpiration
+        if now - lastTime >= KEYFRAME_INTERVAL && cacheExpired {
+            print("New keyframe: timeout reached and cache valid")
+            return true
+        }
+
+        // If cache has expired but time hasn't reached interval, still allow capture
+        if cacheExpired && now - lastTime >= (KEYFRAME_INTERVAL / 2.0) {
+            print("New keyframe: cache expired - allowing update")
+            return true
+        }
+
         return false
     }
 
@@ -230,6 +263,42 @@ class ScanService: NSObject, ObservableObject {
         let angleRadians = 2.0 * acos(simd_clamp(diff.w, -1.0, 1.0))
         let angleDegrees = angleRadians * 180.0 / .pi
         return abs(angleDegrees)
+    }
+
+    // ── Get LiDAR distance at center of frame ──────────────────
+    private func getLidarCenterDistance(depthMap: CVPixelBuffer) -> Float {
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
+        }
+
+        let width  = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+
+        guard let base = CVPixelBufferGetBaseAddress(depthMap)
+        else { return 999.0 }
+
+        let buf    = base.assumingMemoryBound(to: Float32.self)
+        let xStart = width  / 2 - width  / 20   // Center ±5%
+        let xEnd   = width  / 2 + width  / 20
+        let yStart = height / 2 - height / 20
+        let yEnd   = height / 2 + height / 20
+
+        var centerDistances: [Float] = []
+
+        for y in yStart..<yEnd {
+            for x in xStart..<xEnd {
+                let depth = buf[y * width + x]
+                if depth > 0.1 && depth < 5.0 {
+                    centerDistances.append(depth)
+                }
+            }
+        }
+
+        // Return median depth for center region
+        guard !centerDistances.isEmpty else { return 999.0 }
+        centerDistances.sort()
+        return centerDistances[centerDistances.count / 2]
     }
 
     // ── Add user landmark at current position ──────────
