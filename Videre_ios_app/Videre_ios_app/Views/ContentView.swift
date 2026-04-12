@@ -953,6 +953,13 @@ struct ContentView: View {
         lastGuidanceRequestAt = Date()
 
         Task {
+            await MainActor.run {
+                navigation.recordWalkCoordinateSampleIfNeeded(
+                    appState: appState,
+                    scan: scan
+                )
+            }
+
             let payload = navigation.payload(
                 ble: ble,
                 lidar: lidar,

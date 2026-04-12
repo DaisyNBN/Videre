@@ -7,6 +7,9 @@ import { getFallbackResponse } from "../fallback";
 import { getNearbyHazards } from "./processHazard";
 import logger from "./logger";
 
+const USE_GEMINI_NAVIGATION =
+  String(process.env.NAVIGATION_USE_GEMINI ?? "false").toLowerCase() === "true";
+
 export class NavigationError extends Error {
   statusCode: number;
 
@@ -693,12 +696,15 @@ export async function getNavigationInstruction(
     ? await getNearestCheckpoint(request.route_id, request.location, request.map_position)
     : undefined;
 
-  let response: NavResponse;
-  try {
-    response = await getGeminiNavResponse(request, nearest);
-  } catch (err) {
-    logger.error("Gemini failed in navigation pipeline: %o", err);
-    response = getFallbackResponse(request.obstacles, nearest);
+  let response: NavResponse = getFallbackResponse(request.obstacles, nearest);
+
+  if (USE_GEMINI_NAVIGATION) {
+    try {
+      response = await getGeminiNavResponse(request, nearest);
+    } catch (err) {
+      logger.error("Gemini failed in navigation pipeline: %o", err);
+      response = getFallbackResponse(request.obstacles, nearest);
+    }
   }
 
   const hazards = await getNearbyHazards(

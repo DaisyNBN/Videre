@@ -214,6 +214,10 @@ export async function createMap(input: CreateMapInput): Promise<{
         throw new ProcessMapError(400, "At least one scan point is required to build a map");
     }
 
+    // Keep navigation graph deterministic and coordinate-first: do not include
+    // AI-derived landmarks in the route graph source.
+    landmarks = landmarks.filter((landmark) => landmark?.source !== "gemini");
+
     const { data: insertedMap, error: mapError } = await supabase
         .from("room_maps")
         .insert({

@@ -2,6 +2,16 @@ import Combine
 import CoreLocation
 import Foundation
 
+struct WalkCoordinateSample {
+    let timestamp: Date
+    let latitude: Double
+    let longitude: Double
+    let localX: Double
+    let localY: Double
+    let localZ: Double
+    let headingDegrees: Double
+}
+
 /// Builds `POST /api/navigate` style payloads matching backend `NavRequest`.
 final class NavigationContextService: NSObject, ObservableObject {
 
@@ -17,6 +27,7 @@ final class NavigationContextService: NSObject, ObservableObject {
     @Published private(set) var nearbyHazardsCount = 0
     @Published private(set) var hazardPollStatus = ""
     @Published private(set) var autoRerouteStatus = ""
+    @Published private(set) var walkCoordinateSampleCount = 0
 
     var routeId: String = "demo-route"
 
@@ -25,6 +36,9 @@ final class NavigationContextService: NSObject, ObservableObject {
     private var cachedHazardObstacles: [[String: Any]] = []
     private var lastHazardSignature: String = ""
     private var isRerouteInFlight = false
+    private var walkCoordinateTrail: [WalkCoordinateSample] = []
+    private var lastWalkCoordinateSampleAt: Date = .distantPast
+    private let walkCoordinateSampleInterval: TimeInterval = 1.2
 
     override init() {
         super.init()
@@ -87,6 +101,53 @@ final class NavigationContextService: NSObject, ObservableObject {
             "obstacles":       obstacles,
             "speed":           speed
         ]
+    }
+
+    @MainActor
+    func recordWalkCoordinateSampleIfNeeded(appState: AppState, scan: ScanService) {
+        guard appState.walkState == .walking else { return }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastWalkCoordinateSampleAt) >= walkCoordinateSampleInterval else {
+            return
+        }
+
+        let sample = WalkCoordinateSample(
+            timestamp: now,
+            latitude: latitude,
+            longitude: longitude,
+            localX: Double(scan.currentPosition.x),
+            localY: Double(scan.currentPosition.y),
+            localZ: Double(scan.currentPosition.z),
+            headingDegrees: headingDegrees
+        )
+
+        walkCoordinateTrail.append(sample)
+        if walkCoordinateTrail.count > 1200 {
+            walkCoordinateTrail.removeFirst(walkCoordinateTrail.count - 1200)
+        }
+
+        walkCoordinateSampleCount = walkCoordinateTrail.count
+        lastWalkCoordinateSampleAt = now
+    }
+
+    @MainActor
+    func walkCoordinateHistory(limit: Int = 300) -> [[String: Any]] {
+        let boundedLimit = max(1, limit)
+        let startIndex = max(0, walkCoordinateTrail.count - boundedLimit)
+        let window = walkCoordinateTrail[startIndex...]
+
+        return window.map { sample in
+            [
+                "timestamp": sample.timestamp.timeIntervalSince1970,
+                "lat": sample.latitude,
+                "lng": sample.longitude,
+                "x": sample.localX,
+                "y": sample.localY,
+                "z": sample.localZ,
+                "heading_degrees": sample.headingDegrees,
+            ]
+        }
     }
 
     private func startHazardPolling() {

@@ -80,7 +80,7 @@ type AIDetectionRow = {
 
 const MAX_SCAN_KEYFRAMES_ANALYZED = Number.isFinite(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED))
   ? Math.max(1, Math.trunc(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED)))
-  : 8;
+  : 4;
 
 const MIN_KEYFRAME_ANALYSIS_INTERVAL_MS = Number.isFinite(Number(process.env.MIN_KEYFRAME_ANALYSIS_INTERVAL_MS))
   ? Math.max(0, Math.trunc(Number(process.env.MIN_KEYFRAME_ANALYSIS_INTERVAL_MS)))
@@ -535,7 +535,19 @@ export async function analyzeScanById(
   const keyframesToAnalyze = selectKeyframesForAnalysis(keyframes);
 
   if (keyframesToAnalyze.length === 0) {
-    throw new ProcessScanError(400, "No keyframes found for analysis");
+    logger.info(
+      "Scan %s has no analyzable keyframes; skipping AI image analysis and preserving uploaded scan data.",
+      scanId,
+    );
+
+    return {
+      id: scanId,
+      keyframesAnalyzed: 0,
+      aiLandmarksDetected: 0,
+      aiObstaclesDetected: 0,
+      keyframeSummary: [],
+      obstacles: [],
+    };
   }
 
   if (keyframesToAnalyze.length < keyframes.length) {
