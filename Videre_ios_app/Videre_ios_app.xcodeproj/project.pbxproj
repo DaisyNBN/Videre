@@ -29,33 +29,10 @@
 		F7558D7E2F8B7443002EB207 /* Videre_ios_appUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = Videre_ios_appUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		F7558D942F8B7793002EB207 /* Exceptions for "Videre_ios_app" folder in "Videre_ios_app" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Untitled.swift,
-			);
-			target = F7558D662F8B7441002EB207 /* Videre_ios_app */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		F7558D692F8B7441002EB207 /* Videre_ios_app */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				F7558D942F8B7793002EB207 /* Exceptions for "Videre_ios_app" folder in "Videre_ios_app" target */,
-			);
 			path = Videre_ios_app;
-			sourceTree = "<group>";
-		};
-		F7558D772F8B7443002EB207 /* Videre_ios_appTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Videre_ios_appTests;
-			sourceTree = "<group>";
-		};
-		F7558D812F8B7443002EB207 /* Videre_ios_appUITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Videre_ios_appUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -89,8 +66,6 @@
 			isa = PBXGroup;
 			children = (
 				F7558D692F8B7441002EB207 /* Videre_ios_app */,
-				F7558D772F8B7443002EB207 /* Videre_ios_appTests */,
-				F7558D812F8B7443002EB207 /* Videre_ios_appUITests */,
 				F7558D682F8B7441002EB207 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -143,9 +118,6 @@
 			dependencies = (
 				F7558D762F8B7443002EB207 /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				F7558D772F8B7443002EB207 /* Videre_ios_appTests */,
-			);
 			name = Videre_ios_appTests;
 			packageProductDependencies = (
 			);
@@ -166,9 +138,6 @@
 			dependencies = (
 				F7558D802F8B7443002EB207 /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				F7558D812F8B7443002EB207 /* Videre_ios_appUITests */,
-			);
 			name = Videre_ios_appUITests;
 			packageProductDependencies = (
 			);
@@ -188,6 +157,7 @@
 				TargetAttributes = {
 					F7558D662F8B7441002EB207 = {
 						CreatedOnToolsVersion = 16.4;
+						LastSwiftMigration = 1640;
 					};
 					F7558D732F8B7443002EB207 = {
 						CreatedOnToolsVersion = 16.4;
@@ -408,11 +378,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = NMWQ348L94;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Videre-ios-app-Info.plist";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "";
+				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "";
+				INFOPLIST_KEY_NSCameraUsageDescription = "";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -426,6 +401,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.test-connect2.Videre-ios-app";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -436,11 +412,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = NMWQ348L94;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Videre-ios-app-Info.plist";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "";
+				INFOPLIST_KEY_NSBluetoothPeripheralUsageDescription = "";
+				INFOPLIST_KEY_NSCameraUsageDescription = "";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
