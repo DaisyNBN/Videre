@@ -52,7 +52,8 @@ final class NavigationContextService: NSObject, ObservableObject {
     func payload(
         ble: BLEManager,
         lidar: LiDARService,
-        appState: AppState
+        appState: AppState,
+        scan: ScanService
     ) -> [String: Any] {
         APIService.shared.refineRouteGeoCalibration(
             latitude: latitude,
@@ -68,6 +69,11 @@ final class NavigationContextService: NSObject, ObservableObject {
             lidar: lidar
         )
         obstacles.append(contentsOf: cachedHazardObstacles)
+        let mapPosition: [String: Any] = [
+            "x": Double(scan.currentPosition.x),
+            "y": Double(scan.currentPosition.y),
+            "z": Double(scan.currentPosition.z),
+        ]
 
         return [
             "user_id":         DeviceIdentity.userId,
@@ -76,6 +82,7 @@ final class NavigationContextService: NSObject, ObservableObject {
                 "lat": latitude,
                 "lng": longitude
             ],
+            "map_position":    mapPosition,
             "heading_degrees": headingDegrees,
             "obstacles":       obstacles,
             "speed":           speed

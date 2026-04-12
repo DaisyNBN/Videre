@@ -321,6 +321,7 @@ async function persistRouteCheckpoints(
 async function getNearestCheckpoint(
   routeId: string,
   location: { lat: number; lng: number },
+  mapPosition?: { x: number; y: number; z?: number },
 ): Promise<{ label: string; distance: number } | undefined> {
   const { data: checkpoints, error } = await supabase
     .from("route_checkpoints")
@@ -345,7 +346,10 @@ async function getNearestCheckpoint(
   if (checkpoints && checkpoints.length > 0) {
     let minDist = Number.POSITIVE_INFINITY;
     for (const cp of checkpoints) {
-      const dist = haversineMeters(location.lat, location.lng, cp.lat, cp.lng);
+      const dist =
+        typeof mapPosition?.x === "number" && typeof mapPosition?.y === "number"
+          ? Math.hypot(cp.lat - mapPosition.x, cp.lng - mapPosition.y)
+          : haversineMeters(location.lat, location.lng, cp.lat, cp.lng);
       if (dist < minDist) {
         minDist = dist;
         nearest = { label: cp.label, distance: Math.round(dist) };
@@ -686,7 +690,7 @@ export async function getNavigationInstruction(
   request: NavRequest
 ): Promise<NavResponse> {
   const nearest = request.route_id
-    ? await getNearestCheckpoint(request.route_id, request.location)
+    ? await getNearestCheckpoint(request.route_id, request.location, request.map_position)
     : undefined;
 
   let response: NavResponse;

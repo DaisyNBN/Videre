@@ -10,6 +10,7 @@ export type HazardReport = {
 export type NavRequest = {
   route_id: string;
   location: { lat: number; lng: number };
+  map_position?: { x: number; y: number; z?: number };
   heading_degrees: number;
   obstacles: Obstacle[];
   speed: "walking" | "stopped";

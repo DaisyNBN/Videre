@@ -29,10 +29,13 @@ const router = Router();
 function buildInstructionRequest(body: NavigationInstructionBody): NavRequest {
   const routeIdRaw =
     body.route_id ?? body.routeId ?? "";
+  const mapPositionRaw =
+    body.map_position ?? body.mapPosition;
 
   return {
     route_id: routeIdRaw,
     location: body.location,
+    map_position: mapPositionRaw,
     heading_degrees:
       body.heading_degrees ?? body.headingDegrees ?? 0,
     obstacles: body.obstacles,

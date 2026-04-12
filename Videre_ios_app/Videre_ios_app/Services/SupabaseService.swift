@@ -63,6 +63,15 @@ struct RouteCalibrationDebugSnapshot {
     let nearestNodeDistanceM: Double?
 }
 
+struct RouteLocalizationStatus {
+    let active: Bool
+    let confidence: Double
+    let quality: String
+    let nearestNodeId: String?
+    let nearestNodeDistanceM: Double?
+    let message: String
+}
+
 final class APIService {
 
     private struct RouteGeoCalibration {
@@ -416,6 +425,88 @@ final class APIService {
             anchorLng: calibration.anchorLng,
             nearestNodeId: nearest?.id,
             nearestNodeDistanceM: nearestDistance
+        )
+    }
+
+    func routeLocalizationStatus(
+            localX: Double,
+            localY: Double,
+            localZ: Double
+    ) -> RouteLocalizationStatus {
+        guard activeRouteId != nil,
+              !cachedRouteNodeIds.isEmpty
+        else {
+            return RouteLocalizationStatus(
+                active: false,
+                confidence: 0,
+                quality: "unavailable",
+                nearestNodeId: nil,
+                nearestNodeDistanceM: nil,
+                message: "No active route localization"
+            )
+        }
+
+        let routeNodes = cachedRouteNodeIds.compactMap { nodeId -> (id: String, x: Double, y: Double, z: Double)? in
+            guard let node = cachedMapNodesById[nodeId] else {
+                return nil
+            }
+
+            return (id: nodeId, x: node.x, y: node.y, z: node.z)
+        }
+
+        guard !routeNodes.isEmpty else {
+            return RouteLocalizationStatus(
+                active: true,
+                confidence: 0,
+                quality: "low",
+                nearestNodeId: nil,
+                nearestNodeDistanceM: nil,
+                message: "Route map nodes are not loaded"
+            )
+        }
+
+        var nearestNodeId: String?
+        var nearestDistance = Double.greatestFiniteMagnitude
+
+        for node in routeNodes {
+            let dx = node.x - localX
+            let dy = node.y - localY
+            let dz = node.z - localZ
+            let distance = sqrt((dx * dx) + (dy * dy) + (dz * dz))
+
+            if distance < nearestDistance {
+                nearestDistance = distance
+                nearestNodeId = node.id
+            }
+        }
+
+        let clampedDistance = nearestDistance.isFinite
+            ? nearestDistance
+            : 99
+        let confidence = clamp(
+            1 - (clampedDistance / 3.5),
+            min: 0,
+            max: 1
+        )
+
+        let quality: String
+        if clampedDistance <= 1.2 {
+            quality = "high"
+        } else if clampedDistance <= 2.5 {
+            quality = "medium"
+        } else {
+            quality = "low"
+        }
+
+        let message = "\(quality) confidence (\(String(format: "%.1f", clampedDistance)) m from route)"
+
+        return RouteLocalizationStatus(
+            active: true,
+            confidence: confidence,
+            quality: quality,
+            nearestNodeId: nearestNodeId,
+            nearestNodeDistanceM: clampedDistance,
+            message: message
         )
     }
 

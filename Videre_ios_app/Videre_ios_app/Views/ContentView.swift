@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import UIKit
 
 struct ContentView: View {
 
@@ -24,10 +25,21 @@ struct ContentView: View {
     @State private var destinationSuggestionsStatus: String = ""
     @State private var isDestinationSuggestionsLoading: Bool = false
     @State private var recentDestinations: [String] = []
+    @State private var lastSpokenGuidanceInstruction: String = ""
+    @State private var lastSpokenGuidanceAt: Date = .distantPast
+    @State private var lastGuidanceFailureSpeechAt: Date = .distantPast
+    @State private var localizationStatusMessage: String = ""
+    @State private var localizationWarningActive: Bool = false
+    @State private var lastLocalizationWarningSpokenAt: Date = .distantPast
     private let autoGuidanceTimer = Timer.publish(every: 4.0, on: .main, in: .common).autoconnect()
     private let guidanceThrottleInterval: TimeInterval = 2.5
     private let recentDestinationsStorageKey = "videre.recentDestinations"
     private let maxRecentDestinations = 3
+    private let repeatedGuidanceSpeechInterval: TimeInterval = 8.0
+    private let guidanceFailureSpeechCooldown: TimeInterval = 12.0
+    private let localizationWarningDistanceThreshold: Double = 2.8
+    private let localizationRecoveryDistanceThreshold: Double = 1.8
+    private let localizationWarningSpeechCooldown: TimeInterval = 8.0
 
     init(openScan: @escaping () -> Void = {}) {
         self.openScan = openScan
@@ -123,6 +135,13 @@ struct ContentView: View {
                     Text(autoGuidanceStatus)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
+
+                    if !localizationStatusMessage.isEmpty {
+                        Text(localizationStatusMessage)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(localizationWarningActive ? .orange : .secondary)
+                            .lineLimit(2)
+                    }
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Destination room")
@@ -659,7 +678,8 @@ struct ContentView: View {
         let p = navigation.payload(
             ble: ble,
             lidar: lidar,
-            appState: appState)
+            appState: appState,
+            scan: scan)
         guard JSONSerialization.isValidJSONObject(p),
               let data = try? JSONSerialization.data(
                   withJSONObject: p,
@@ -687,6 +707,7 @@ struct ContentView: View {
         let destination = destinationInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !destination.isEmpty else {
             destinationRouteStatus = "Enter a destination room label first"
+            VoiceService.shared.speak("Please provide a destination room.", priority: .high)
             return
         }
 
@@ -694,11 +715,16 @@ struct ContentView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !mapId.isEmpty else {
             destinationRouteStatus = "No active map available. Scan and upload a floor first"
+            VoiceService.shared.speak(
+                "No map is active. Please scan and upload this floor first.",
+                priority: .high
+            )
             return
         }
 
         isDestinationRouteInFlight = true
         destinationRouteStatus = "Generating route to \(destination)..."
+        VoiceService.shared.speak("Generating route to \(destination).")
 
         let position = scan.currentPosition
         Task {
@@ -725,6 +751,10 @@ struct ContentView: View {
                     destinationRouteStatus =
                         "Failed to route to \(destination): \(error.localizedDescription)"
                     isDestinationRouteInFlight = false
+                    VoiceService.shared.speak(
+                        "Unable to create route to \(destination). \(error.localizedDescription)",
+                        priority: .high
+                    )
                 }
             }
         }
@@ -926,8 +956,26 @@ struct ContentView: View {
             let payload = navigation.payload(
                 ble: ble,
                 lidar: lidar,
-                appState: appState
+                appState: appState,
+                scan: scan
             )
+            let localizationStatus = APIService.shared.routeLocalizationStatus(
+                localX: Double(scan.currentPosition.x),
+                localY: Double(scan.currentPosition.y),
+                localZ: Double(scan.currentPosition.z)
+            )
+
+            if shouldHoldGuidanceForLocalization(localizationStatus) {
+                await MainActor.run {
+                    applyLocalizationWarning(localizationStatus)
+                    isGuidanceRequestInFlight = false
+                }
+                return
+            }
+
+            await MainActor.run {
+                clearLocalizationWarningIfRecovered(localizationStatus)
+            }
 
             do {
                 let response = try await APIService.shared.postNavigate(payload)
@@ -949,12 +997,24 @@ struct ContentView: View {
                         "Distance: \(distanceText), " +
                         "Fallback: \(fallbackText)"
 
-                    let priority: VoiceService.Priority =
-                        response.urgency == "high" ? .high : .normal
-                    VoiceService.shared.speak(
-                        response.instruction,
-                        priority: priority
+                    applyHapticPattern(
+                        response.hapticPattern,
+                        urgency: response.urgency
                     )
+
+                    if shouldSpeakGuidanceInstruction(
+                        response.instruction,
+                        urgency: response.urgency
+                    ) {
+                        let priority: VoiceService.Priority =
+                            response.urgency == "high" ? .high : .normal
+                        VoiceService.shared.speak(
+                            response.instruction,
+                            priority: priority
+                        )
+                        lastSpokenGuidanceInstruction = response.instruction
+                        lastSpokenGuidanceAt = Date()
+                    }
 
                     isGuidanceRequestInFlight = false
                 }
@@ -963,8 +1023,127 @@ struct ContentView: View {
                     lastNavigationMeta =
                         "Navigation request failed: \(error.localizedDescription)"
                     isGuidanceRequestInFlight = false
+
+                    let now = Date()
+                    if now.timeIntervalSince(lastGuidanceFailureSpeechAt) >= guidanceFailureSpeechCooldown {
+                        VoiceService.shared.speak(
+                            "Navigation update failed. \(error.localizedDescription)",
+                            priority: .high
+                        )
+                        lastGuidanceFailureSpeechAt = now
+                    }
                 }
             }
+        }
+    }
+
+    private func shouldHoldGuidanceForLocalization(_ status: RouteLocalizationStatus) -> Bool {
+        guard status.active else {
+            return false
+        }
+
+        guard let distance = status.nearestNodeDistanceM else {
+            return true
+        }
+
+        if localizationWarningActive {
+            return distance > localizationRecoveryDistanceThreshold
+        }
+
+        return distance > localizationWarningDistanceThreshold || status.confidence < 0.3
+    }
+
+    private func applyLocalizationWarning(_ status: RouteLocalizationStatus) {
+        localizationWarningActive = true
+        localizationStatusMessage = status.message
+        lastNavigationMeta = "Localization uncertain: \(status.message)"
+
+        applyHapticPattern("continuous", urgency: "high")
+
+        let now = Date()
+        if now.timeIntervalSince(lastLocalizationWarningSpokenAt) >= localizationWarningSpeechCooldown {
+            VoiceService.shared.speak(
+                "Localization uncertain. Slow down and scan a known landmark to re-anchor.",
+                priority: .high
+            )
+            lastLocalizationWarningSpokenAt = now
+        }
+    }
+
+    private func clearLocalizationWarningIfRecovered(_ status: RouteLocalizationStatus) {
+        guard localizationWarningActive else {
+            localizationStatusMessage = ""
+            return
+        }
+
+        localizationWarningActive = false
+        localizationStatusMessage = ""
+        lastNavigationMeta = "Localization recovered: \(status.message)"
+
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.prepare()
+        generator.impactOccurred()
+
+        VoiceService.shared.speak("Localization recovered. Continue navigation.")
+    }
+
+    private func shouldSpeakGuidanceInstruction(_ instruction: String, urgency: String) -> Bool {
+        let normalizedInstruction = instruction
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalizedInstruction.isEmpty else {
+            return false
+        }
+
+        if urgency.lowercased() == "high" {
+            return true
+        }
+
+        let changed = normalizedInstruction.compare(
+            lastSpokenGuidanceInstruction,
+            options: .caseInsensitive
+        ) != .orderedSame
+
+        if changed {
+            return true
+        }
+
+        return Date().timeIntervalSince(lastSpokenGuidanceAt) >= repeatedGuidanceSpeechInterval
+    }
+
+    private func applyHapticPattern(_ pattern: String, urgency: String) {
+        let normalizedPattern = pattern.lowercased()
+
+        switch normalizedPattern {
+        case "single_tap":
+            let generator = UIImpactFeedbackGenerator(style: .light)
+            generator.prepare()
+            generator.impactOccurred()
+        case "double_tap":
+            let generator = UIImpactFeedbackGenerator(style: .medium)
+            generator.prepare()
+            generator.impactOccurred()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+                generator.impactOccurred()
+            }
+        case "continuous":
+            let generator = UINotificationFeedbackGenerator()
+            generator.prepare()
+            generator.notificationOccurred(.warning)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                generator.notificationOccurred(.warning)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                generator.notificationOccurred(.warning)
+            }
+        default:
+            break
+        }
+
+        if urgency.lowercased() == "high" && normalizedPattern != "continuous" {
+            let emergencyGenerator = UINotificationFeedbackGenerator()
+            emergencyGenerator.prepare()
+            emergencyGenerator.notificationOccurred(.warning)
         }
     }
 

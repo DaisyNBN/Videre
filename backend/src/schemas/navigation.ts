@@ -21,6 +21,8 @@ export const navigationInstructionBodySchema = z.object({
     route_id: z.string().optional(),
     routeId: z.string().optional(),
     location: locationSchema,
+    map_position: coordinateSchema.optional(),
+    mapPosition: coordinateSchema.optional(),
     heading_degrees: z.number().finite().optional(),
     headingDegrees: z.number().finite().optional(),
     obstacles: z.array(obstacleSchema).optional().default([]),

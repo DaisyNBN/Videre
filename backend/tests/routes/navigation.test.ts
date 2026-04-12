@@ -85,6 +85,39 @@ describe("navigation routes", () => {
         expect(response.body.data.instruction).toBe("Continue straight");
     });
 
+    it("accepts map-position in instructions payload", async () => {
+        mockGetNavigationInstruction.mockResolvedValue({
+            instruction: "Proceed to Room 201",
+            urgency: "low",
+            haptic_pattern: "single_tap",
+            next_checkpoint: "Room 201",
+            distance_to_next_m: 3,
+            fallback_used: false,
+        });
+
+        const app = createApp();
+
+        const response = await request(app)
+            .post("/api/navigation/instructions")
+            .send({
+                routeId: "route-123",
+                location: { lat: 12.1, lng: 34.2 },
+                mapPosition: { x: 1.25, y: -0.4, z: 0.9 },
+                headingDegrees: 90,
+                obstacles: [],
+                speed: "walking",
+            });
+
+        expect(response.status).toBe(200);
+        expect(response.body.success).toBe(true);
+        expect(mockGetNavigationInstruction).toHaveBeenCalledWith(
+            expect.objectContaining({
+                route_id: "route-123",
+                map_position: { x: 1.25, y: -0.4, z: 0.9 },
+            }),
+        );
+    });
+
     it("returns 400 for invalid instructions payload", async () => {
         const app = createApp();
 
