@@ -29,16 +29,16 @@ final class NavigationContextService: NSObject, ObservableObject {
     override init() {
         super.init()
         manager.delegate = self
-        // Best accuracy (~5m indoors) for precise real-time location display
-        manager.desiredAccuracy = kCLLocationAccuracyBest
-        // Real-time distance filter (0 = no delay between updates)
-        manager.distanceFilter = kCLDistanceFilterNone
-        // High frequency tracking for navigation
+        // Highest accuracy for real-time centimeter-level tracking
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        // Update on every centimeter of movement for ultra-responsive display
+        manager.distanceFilter = 0.01  // 1 cm threshold
+        // Fitness activity for high-frequency GPS sampling
         manager.activityType = .fitness
-        // Prevent iOS from batching updates or pausing when moving to background
+        // Prevent iOS from batching updates or pausing
         manager.pausesLocationUpdatesAutomatically = false
         if CLLocationManager.headingAvailable() {
-            manager.headingFilter = 5
+            manager.headingFilter = 1  // Finer heading resolution (1 degree)
         }
     }
 

@@ -112,13 +112,13 @@ class ScanService: NSObject, ObservableObject {
     override init() {
         super.init()
         locationManager.delegate = self
-        // Highest accuracy for real-time tracking (~5m indoors)
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
-        // Real-time updates (0 = no filtering)
-        locationManager.distanceFilter = kCLDistanceFilterNone
-        // High frequency updates for real-time display
+        // Highest accuracy for real-time centimeter-level tracking
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        // Update on every centimeter of movement for ultra-responsive display
+        locationManager.distanceFilter = 0.01  // 1 cm threshold
+        // Fitness activity for high-frequency GPS sampling
         locationManager.activityType = .fitness
-        // Prevent iOS from batching updates or pausing when moving to background
+        // Prevent iOS from batching updates or pausing
         locationManager.pausesLocationUpdatesAutomatically = false
     }
 
