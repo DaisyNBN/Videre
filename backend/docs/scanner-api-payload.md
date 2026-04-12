@@ -68,7 +68,7 @@ Send selected keyframes instead of full video.
 
 - `keyframes`: array of selected frames
 - each keyframe should include:
-  - `imageUrl` or `uploadId`
+  - `imageBase64` (JPEG/PNG base64 string, with or without data URI prefix)
   - `timestamp`
   - `cameraPose`
   - optional camera intrinsics (`fx`, `fy`, `cx`, `cy`)
@@ -111,7 +111,7 @@ Include data needed for robust retry and ordering.
   ],
   "keyframes": [
     {
-      "imageUrl": "https://storage.example.com/kf_001.jpg",
+      "imageBase64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...",
       "timestamp": 1712913000500,
       "cameraPose": { "x": 0.4, "y": 0.0, "z": 0.1 }
     }
@@ -133,3 +133,6 @@ Include data needed for robust retry and ordering.
 - Use chunked uploads for large scans.
 - Validate all coordinates are finite numbers.
 - Ensure timestamps are monotonic within each scan.
+- Recommended keyframe size limit: <= 10 MB per frame after base64 decoding.
+- Recommended scan payload size limit: <= 50 MB per request (use chunking above that).
+- Reject malformed base64 strings and non-image MIME prefixes before enqueueing AI analysis.

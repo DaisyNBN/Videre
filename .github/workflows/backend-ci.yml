@@ -1,0 +1,38 @@
+name: Backend CI
+
+on:
+  push:
+    paths:
+      - backend/**
+      - .github/workflows/backend-ci.yml
+  pull_request:
+    paths:
+      - backend/**
+      - .github/workflows/backend-ci.yml
+
+jobs:
+  backend-build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm run test

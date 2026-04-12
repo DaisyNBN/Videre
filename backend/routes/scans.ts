@@ -1,6 +1,12 @@
 import { Request, Response } from "express";
-import { ScanUploadRequest } from "../src/types";
 import { ApiResponse } from "../src/ApiResponse";
+import { validateBody, validateParams } from "../src/middleware/validate";
+import {
+    scanCreateBodySchema,
+    scanIdParamsSchema,
+    ScanCreateBody,
+    ScanIdParams,
+} from "../src/schemas/scans";
 import logger from "../src/services/logger";
 import {
     ProcessScanError,
@@ -16,33 +22,17 @@ const router = require("express").Router();
 // POST /api/scans
 // - Create a new scan upload record.
 // - Accept`ScanUploadRequest` payload (`roomName`, scan timing/device data, points, landmarks, keyframes, depthSamples).
-router.post('/', async (req: Request, res: Response) => {
-    const { roomName, startedAt, endedAt, device, points, landmarks, keyframes, depthSamples } = req.body as ScanUploadRequest;
-    // verify request data
-    if (!roomName || !startedAt || !endedAt || !device || !points || !landmarks || !keyframes || !depthSamples) {
-        return res.status(400).json(new ApiResponse(false, 'Missing required fields'));
-    }
-    if (!Array.isArray(points) || !Array.isArray(landmarks) || !Array.isArray(keyframes) || !Array.isArray(depthSamples)) {
-        return res.status(400).json(new ApiResponse(false, 'Points, landmarks, keyframes, and depthSamples must be arrays'));
-    }
-    if (points.length === 0) {
-        return res.status(400).json(new ApiResponse(false, 'Points array cannot be empty'));
-    }
-    if (landmarks.length === 0) {
-        return res.status(400).json(new ApiResponse(false, 'Landmarks array cannot be empty'));
-    }
-    if (typeof roomName !== 'string') {
-        return res.status(400).json(new ApiResponse(false, 'roomName must be a string'));
-    }
-    if (typeof startedAt !== 'string' || isNaN(Date.parse(startedAt))) {
-        return res.status(400).json(new ApiResponse(false, 'startedAt must be a valid ISO date string'));
-    }
-    if (typeof endedAt !== 'string' || isNaN(Date.parse(endedAt))) {
-        return res.status(400).json(new ApiResponse(false, 'endedAt must be a valid ISO date string'));
-    }
-    if (typeof device !== 'object' || !device.model || !device.osVersion || !device.appVersion) {
-        return res.status(400).json(new ApiResponse(false, 'device must be an object with model, osVersion, and appVersion fields'));
-    }
+router.post('/', validateBody(scanCreateBodySchema), async (req: Request, res: Response) => {
+    const {
+        roomName,
+        startedAt,
+        endedAt,
+        device,
+        points,
+        landmarks,
+        keyframes,
+        depthSamples,
+    } = req.body as ScanCreateBody;
 
     let scanId: string;
     try {
@@ -66,7 +56,11 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     try {
-        await analyzeScanById(scanId);
+        await analyzeScanById(scanId, {
+            keyframes,
+            depthSamples,
+            existingLandmarks: landmarks,
+        });
     } catch (analysisError) {
         logger.error('Post-insert analysis failed for scan %s: %o', scanId, analysisError);
     }
@@ -76,12 +70,8 @@ router.post('/', async (req: Request, res: Response) => {
 
 // GET /api/scans/:scanId
 // - Return scan details and metadata.
-router.get('/:id', async (req: Request, res: Response) => {
-    const scanId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    // Validate scanId
-    if (!scanId) {
-        return res.status(400).json(new ApiResponse(false, 'Scan ID is required'));
-    }
+router.get('/:id', validateParams(scanIdParamsSchema), async (req: Request, res: Response) => {
+    const { id: scanId } = req.params as ScanIdParams;
 
     try {
         const data = await getScanById(scanId);
@@ -98,12 +88,8 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 // GET / api / scans /: scanId / processing
 // - Return processing status (`uploaded`, `ai - processing`, `graph - built`, `failed`).
-router.get('/:id/processing', async (req: Request, res: Response) => {
-    const scanId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    // Validate scanId
-    if (!scanId) {
-        return res.status(400).json(new ApiResponse(false, 'Scan ID is required'));
-    }
+router.get('/:id/processing', validateParams(scanIdParamsSchema), async (req: Request, res: Response) => {
+    const { id: scanId } = req.params as ScanIdParams;
 
     try {
         const data = await getScanProcessingStatus(scanId);
@@ -120,12 +106,8 @@ router.get('/:id/processing', async (req: Request, res: Response) => {
 
 // POST /api/scans/:scanId/analyze
 // - Trigger AI analysis for scan keyframes.
-router.post('/:id/analyze', async (req: Request, res: Response) => {
-    const scanId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    // Validate scanId
-    if (!scanId) {
-        return res.status(400).json(new ApiResponse(false, 'Scan ID is required'));
-    }
+router.post('/:id/analyze', validateParams(scanIdParamsSchema), async (req: Request, res: Response) => {
+    const { id: scanId } = req.params as ScanIdParams;
 
     try {
         const result = await analyzeScanById(scanId);
@@ -142,11 +124,8 @@ router.post('/:id/analyze', async (req: Request, res: Response) => {
 
 // GET /api/scans/:scanId/detections
 // - Return AIObjectDetection[] with confidence and optional bounding box.
-router.get('/:id/detections', async (req: Request, res: Response) => {
-    const scanId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    if (!scanId) {
-        return res.status(400).json(new ApiResponse(false, 'Scan ID is required'));
-    }
+router.get('/:id/detections', validateParams(scanIdParamsSchema), async (req: Request, res: Response) => {
+    const { id: scanId } = req.params as ScanIdParams;
 
     try {
         const detectionsData = await getScanDetections(scanId);

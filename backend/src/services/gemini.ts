@@ -136,7 +136,7 @@ export async function getGeminiNavResponse(
   }
 }
 
-export async function analyzeImageWithGemini(
+export async function analyzeImageWithVision(
   imageUrl: string,
   depthData: unknown,
   cameraPose: { x: number; y: number; z: number }
@@ -218,7 +218,7 @@ export async function analyzeImageWithGemini(
         ],
       }),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Gemini vision timeout")), GEMINI_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("Vision API timeout")), GEMINI_TIMEOUT_MS)
       ),
     ]);
 
@@ -242,6 +242,12 @@ export async function analyzeImageWithGemini(
         position: toPosition(centerX),
         distance_estimate: toDistanceEstimate(area),
         confidence: Number(obj.score ?? 0),
+        boundingBox: {
+          x: minX,
+          y: minY,
+          width: Math.max(0, maxX - minX),
+          height: Math.max(0, maxY - minY),
+        },
       };
     });
 
@@ -266,7 +272,10 @@ export async function analyzeImageWithGemini(
 
     return { landmarks, obstacles };
   } catch (err) {
-    console.error("Gemini vision analysis failed:", err);
+    console.error("Vision API analysis failed:", err);
     return { landmarks: [], obstacles: [] };
   }
 }
+
+// Backward-compatible alias while routes/services migrate naming.
+export const analyzeImageWithGemini = analyzeImageWithVision;

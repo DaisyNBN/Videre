@@ -1,16 +1,15 @@
 import { Request, Response } from "express";
+import { ApiResponse } from "../src/ApiResponse";
+import { validateBody, validateQuery } from "../src/middleware/validate";
+import { nearbyHazardsQuerySchema, reportHazardBodySchema } from "../src/schemas/hazards";
+import logger from "../src/services/logger";
 import { insertHazard, getNearbyHazards } from "../src/services/processHazard";
 
 const router = require("express").Router();
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", validateBody(reportHazardBodySchema), async (req: Request, res: Response) => {
   try {
     const { lat, lng, type, description } = req.body;
-
-    if (!lat || !lng || !type) {
-      res.status(400).json({ error: "Missing lat, lng, or type" });
-      return;
-    }
 
     const result = await insertHazard({
       lat,
@@ -22,32 +21,30 @@ router.post("/", async (req: Request, res: Response) => {
     });
 
     if (result.success) {
-      res.status(201).json({ message: "Hazard reported" });
+      res.status(201).json(new ApiResponse(true, "Hazard reported"));
     } else {
-      res.status(500).json({ error: result.error });
+      res.status(500).json(new ApiResponse(false, result.error ?? "Failed to report hazard"));
     }
   } catch (err) {
-    console.error("Hazard report error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    logger.error("Hazard report error: %o", err);
+    res.status(500).json(new ApiResponse(false, "Internal server error"));
   }
 });
 
-router.get("/nearby", async (req: Request, res: Response) => {
+router.get("/nearby", validateQuery(nearbyHazardsQuerySchema), async (req: Request, res: Response) => {
   try {
-    const lat = parseFloat(req.query.lat as string);
-    const lng = parseFloat(req.query.lng as string);
-    const radius = parseFloat(req.query.radius as string) || 100;
-
-    if (isNaN(lat) || isNaN(lng)) {
-      res.status(400).json({ error: "Missing or invalid lat/lng" });
-      return;
-    }
+    const { lat, lng, radius } = nearbyHazardsQuerySchema.parse(req.query);
 
     const hazards = await getNearbyHazards(lat, lng, radius);
-    res.json({ hazards, count: hazards.length });
+    res.json(
+      new ApiResponse(true, "Nearby hazards fetched", {
+        hazards,
+        count: hazards.length,
+      }),
+    );
   } catch (err) {
-    console.error("Nearby hazards error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    logger.error("Nearby hazards error: %o", err);
+    res.status(500).json(new ApiResponse(false, "Internal server error"));
   }
 });
 

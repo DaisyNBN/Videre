@@ -1,210 +1,214 @@
-# Backend Missing Tasks and Implementation Steps
+# Backend Reassessment Tasks (Updated)
 
-This checklist compares the current backend against the overview, route plan, payload contract, and schema proposal.
+This checklist was reassessed against the current codebase and project docs.
 
-## Current Status Summary
+## Reassessment Snapshot
 
-- Implemented: scan ingest routes, scan analysis trigger, detections route, hazard routes, health route.
-- Partially implemented: navigation (single endpoint, not full planned route set).
-- Missing: maps, landmark management, verification, collaboration, full schema alignment, and full contract consistency.
+- Completed since last review: scan route flow refactored into service layer (`processScan.ts`).
+- Completed since last review: scan create/analyze/detections endpoints are wired and build-clean.
+- Completed since last review: user_id/userId requirements removed from active API contracts.
+- Completed since last review: schema alignment SQL draft exists (`docs/align-schema-to-docs.sql`).
+- Completed: maps route set (`POST /api/maps`, `GET /api/maps`, `GET /api/maps/:id`, `GET /api/maps/:id/graph`, `POST /api/maps/:id/version`).
+- Completed: navigation split routes (`POST /api/navigation/routes`, `POST /api/navigation/instructions`, `POST /api/navigation/reroute`) with `/api/navigate` compatibility alias.
+- Completed: landmark CRUD + verification endpoints.
+- Completed: version endpoint (`GET /api/version`).
+- In progress: contributions routes implemented, pending DB table migration (`docs/map-contributions-schema.sql`).
+- In progress: request validation/error standardization middleware is active on navigation and hazards routes.
+- In progress: automated tests and CI are set up with passing baseline route tests.
 
-## Task 1: Implement Database Migrations for the Proposed Schema
+## Task 1: Execute and Validate Schema Alignment SQL
 
-Status: Not done.
-
-What is missing:
-
-- The schema in docs is not fully represented as migration files.
-- Core graph, verification, and AI detection tables are not fully operational as a normalized model.
-
-Steps:
-
-1. Create enum migrations for landmark_type, landmark_source, node_type, and verification_status.
-2. Create table migrations for room_maps, map_nodes, map_edges, landmarks, landmark_verifications, scans, scan_points, scan_landmarks, ai_detections, and hazard_reports.
-3. Add constraints and indexes for keys, confidence bounds, and high-traffic query columns.
-4. Apply migrations locally and run insert/select smoke tests for each table group.
-
-## Task 2: Finish Map Routes
-
-Status: Not done.
+Status: In progress.
 
 What is missing:
 
-- The maps route module is empty.
-- Phase 3 map endpoints from the route plan are not available.
+- `docs/align-schema-to-docs.sql` is drafted but not confirmed as executed in Supabase.
+- A rollback-safe smoke test script now exists at `docs/schema-validation-smoke-tests.sql`, but it has not been run yet.
 
 Steps:
 
-1. Implement POST /api/maps to build and persist a map from processed scan output.
-2. Implement GET /api/maps to list maps by room and version filters.
-3. Implement GET /api/maps/:mapId to fetch map metadata.
-4. Implement GET /api/maps/:mapId/graph to return nodes and edges.
-5. Implement POST /api/maps/:mapId/version to create a new map version.
+1. Run `docs/align-schema-to-docs.sql` in Supabase SQL Editor.
+2. Verify enum/table/constraint alignment with `postgres-schema.md`.
+3. Run `docs/schema-validation-smoke-tests.sql` after migration and confirm all checks pass.
+4. Capture any migration errors and patch SQL for idempotent re-runs.
 
-## Task 3: Finish Landmark Management Routes
+## Task 2: Normalize Scan Persistence to Match Schema
 
-Status: Not done.
+Status: In progress.
 
 What is missing:
 
-- The landmarks route module is empty.
-- Landmark CRUD and map-level edits are not available.
+- New writes now use `scan_points` and `scan_landmarks`, but historical rows may still only exist in legacy JSON columns.
+- Re-analysis by scan ID still depends on legacy keyframe/depth storage unless analysis is triggered at upload time.
+- A one-time backfill script exists at `docs/backfill-scan-json-to-normalized.sql`, but it has not been run yet.
 
 Steps:
 
-1. Implement POST /api/maps/:mapId/landmarks to create landmarks.
-2. Implement GET /api/maps/:mapId/landmarks to list landmarks.
-3. Implement PATCH /api/maps/:mapId/landmarks/:landmarkId to update label, type, or position.
-4. Implement DELETE /api/maps/:mapId/landmarks/:landmarkId to remove invalid landmarks.
+1. Run `docs/backfill-scan-json-to-normalized.sql` to migrate legacy JSON rows.
+2. Verify reads for legacy scans now come from normalized tables after backfill.
+3. Decide a long-term storage path for keyframes/depth samples (legacy columns vs normalized tables).
+4. Remove legacy JSON fallback once all clients and historical data are migrated.
 
-## Task 4: Add Verification Routes and Confidence Workflow
+## Task 3: Complete Map Routes
 
-Status: Not done.
+Status: Implemented (validation pending).
 
 What is missing:
 
-- Verification endpoints in the route plan are not implemented.
-- Confidence/review lifecycle is not persisted.
+- End-to-end route behavior has not been API-tested against live Supabase data.
+- Version-clone behavior needs smoke testing with real map nodes/edges.
 
 Steps:
 
-1. Implement POST /api/landmarks/:landmarkId/verify to submit verification actions.
-2. Implement GET /api/landmarks/:landmarkId/verifications for audit history.
-3. Implement GET /api/maps/:mapId/verification-summary for reliability metrics.
-4. Update landmark status and confidence using aggregated verification outcomes.
+1. Run API smoke tests for `POST /api/maps`, `GET /api/maps`, `GET /api/maps/:id`, `GET /api/maps/:id/graph`, and `POST /api/maps/:id/version`.
+2. Validate map versioning copies all nodes/edges correctly.
+3. Add integration tests for map listing filters and graph retrieval.
 
-## Task 5: Complete Planned Navigation API Surface
+## Task 4: Complete Landmark Management and Verification Routes
 
-Status: Partial.
+Status: Implemented (validation pending).
 
 What is missing:
 
-- Planned navigation routes are not split by responsibility.
-- Current navigation does not fully follow graph-based route generation flow in docs.
+- End-to-end behavior for landmark CRUD and verification aggregation is not API-tested.
+- Verification identity strategy is temporary (`verifiedBy` auto-generated when omitted).
 
 Steps:
 
-1. Implement POST /api/navigation/routes for graph-based A* route generation.
-2. Implement POST /api/navigation/instructions for turn-by-turn instruction output.
-3. Implement POST /api/navigation/reroute for dynamic obstacle/drift updates.
-4. Keep current endpoint as a temporary compatibility alias until clients migrate.
+1. Run API smoke tests for map-scoped landmark CRUD routes.
+2. Run API smoke tests for `POST /api/landmarks/:id/verify` and `GET /api/landmarks/:id/verifications`.
+3. Validate confidence/status aggregation updates on `landmarks` after verification writes.
+4. Replace temporary `verifiedBy` fallback with authenticated identity when auth is introduced.
 
-## Task 6: Persist AI Detections in Dedicated Storage
+## Task 5: Expand Navigation API to Planned Surface
 
-Status: Partial.
+Status: Implemented (validation pending).
 
 What is missing:
 
-- AI detections are merged into scan landmarks but not persisted as dedicated ai_detections rows.
-- Detections endpoint cannot consistently return bounding boxes from storage.
+- End-to-end behavior is not yet smoke-tested with real map graph data.
+- Route checkpoint persistence depends on `route_checkpoints` schema availability.
 
 Steps:
 
-1. Insert per-keyframe detections into ai_detections during analysis.
-2. Save confidence and optional bounding box fields when available.
-3. Update GET /api/scans/:scanId/detections to read from ai_detections first.
-4. Keep a fallback path for legacy scans that only contain landmarks JSON.
+1. Run API smoke tests for `/api/navigation/routes`, `/api/navigation/instructions`, and `/api/navigation/reroute`.
+2. Verify `/api/navigate` compatibility path continues to return instruction responses.
+3. Validate checkpoint persistence and nearest-checkpoint resolution behavior in real DB.
 
-## Task 7: Align Scan Payload Contract Across Docs and Code
+## Task 6: Persist AI Detections to ai_detections and Use Them
 
-Status: Inconsistent.
+Status: Implemented (validation pending).
 
 What is missing:
 
-- Docs still show keyframe imageUrl while backend expects imageBase64.
-- Advanced payload fields in docs are not fully validated server-side.
+- Endpoint behavior is not yet smoke-tested against migrated DB state.
+- Historical scans still rely on fallback paths if `ai_detections` has no rows.
 
 Steps:
 
-1. Update scanner payload docs and examples to imageBase64.
-2. Update mobile payload spec and uploader examples to match server contract.
-3. Add validation for base64 format, payload size, and timestamp consistency.
-4. Add optional handling for arTrackingQuality, coordinateSystem, sequenceNumber, checksum, and idempotencyKey.
+1. Run API smoke tests to confirm detections are persisted per analysis run.
+2. Verify bounding box fields are populated when object localization provides geometry.
+3. Verify fallback behavior for older scans with no `ai_detections` rows.
 
-## Task 8: Resolve AI Provider Naming and Architecture Consistency
+## Task 7: Align Payload Docs With Runtime Contract
 
-Status: Inconsistent.
+Status: In progress.
 
 What is missing:
 
-- Documentation says Gemini Vision, while implementation now uses Google Cloud Vision in image analysis.
-- Function names still imply Gemini in places where Vision is used.
+- `scanner-api-payload.md` now uses `imageBase64` and includes size/validation guidance.
+- Remaining docs and client integration notes still need a consistency pass.
 
 Steps:
 
-1. Decide the canonical image-analysis provider strategy.
-2. Rename service and function names to match the chosen provider.
-3. Update overview and architecture docs to reflect the true backend implementation.
-4. Add startup checks for required provider credentials.
+1. Update iOS integration notes and any remaining docs to `imageBase64`.
+2. Add optional field handling guidance for tracking quality and checksum metadata.
+3. Add server-side payload validation enforcement to match documented limits.
+
+## Task 8: Resolve AI Provider Naming/Implementation Mismatch
+
+Status: In progress.
+
+What is missing:
+
+- Scan service now calls `analyzeImageWithVision`, with backwards-compatible alias retained.
+- Overview and architecture docs still reference Gemini Vision for image analysis.
+
+Steps:
+
+1. Finalize canonical provider strategy (Gemini text + Vision image, or hybrid abstraction).
+2. Update overview/architecture docs to reflect current implementation.
+3. Add explicit startup checks for Vision credentials and error messaging.
 
 ## Task 9: Add Collaboration Routes
 
-Status: Not done.
+Status: In progress.
 
 What is missing:
 
-- Contribution workflows from Phase 6 are not implemented.
+- Endpoints now exist under `/api/maps/:mapId/contributions`.
+- `map_contributions` table must be created in Supabase before runtime use.
+- Accepted-contribution workflow is currently "submit and optional immediate version creation"; no dedicated review endpoint yet.
 
 Steps:
 
-1. Implement POST /api/maps/:mapId/contributions for user-submitted edits.
-2. Implement GET /api/maps/:mapId/contributions for pending and accepted reviews.
-3. Link accepted contributions to map version creation.
+1. Run `docs/map-contributions-schema.sql` in Supabase.
+2. Smoke-test `POST/GET /api/maps/:mapId/contributions`.
+3. Add a dedicated review/approval endpoint if moderation workflow needs separation.
 
-## Task 10: Add Version Route and Capability Metadata
+## Task 10: Add Version Endpoint and Capability Metadata
 
-Status: Not done.
+Status: Implemented.
 
 What is missing:
 
-- GET /api/version endpoint from the route plan is absent.
+- Endpoint contract now has route test coverage.
 
 Steps:
 
-1. Add GET /api/version in the root router.
-2. Return app version, environment, and build metadata.
-3. Include feature flags for scan analysis, navigation, and map features.
+1. Keep version metadata test updated when feature flags change.
 
-## Task 11: Add Request Validation Layer and Error Standardization
+## Task 11: Standardize Validation and Error Handling
 
-Status: Partial.
+Status: Implemented (hardening pending).
 
 What is missing:
 
-- Validation is manual and repeated across routes.
-- Error responses are not fully standardized.
+- Shared zod validation middleware and centralized error handler now exist.
+- Navigation, hazards, scans, maps, and landmark verification routes are standardized to validated input + `ApiResponse` output.
+- Remaining hardening is mostly around removing duplicated route-level try/catch blocks where central error middleware can own unexpected failures.
 
 Steps:
 
-1. Add zod schemas for all route inputs and outputs.
-2. Replace manual validation blocks with shared schema parsing.
-3. Standardize all route errors to ApiResponse format.
-4. Add centralized Express error middleware.
+1. Shift non-domain unexpected failures to centralized error middleware where practical.
+2. Keep schema contracts in sync with route/service changes.
+3. Ensure all remaining route errors are consistently wrapped in `ApiResponse`.
+4. Add regression tests for validation edge cases as routes evolve.
 
-## Task 12: Add Basic Automated Test Coverage
+## Task 12: Add Automated Tests and CI Checks
 
-Status: Not done.
+Status: In progress.
 
 What is missing:
 
-- No baseline route and service tests for critical flows.
+- Vitest + Supertest are configured, and route tests now cover navigation, hazards, scans, maps, landmarks, and version metadata.
+- GitHub Actions workflow exists to run build + tests.
+- Critical scan/map service behaviors still need deeper integration coverage.
 
 Steps:
 
-1. Add route tests for scans create, analyze, and detections.
-2. Add service tests for navigation fallback and hazard handling.
-3. Add DB integration smoke tests for migrated schema.
-4. Add build and test steps to CI.
+1. Extend route tests for edge/failure scenarios on scans and maps endpoints.
+2. Add service-level tests for scan analysis fallback and map version cloning.
+3. Add DB-backed integration smoke tests after schema migration runs.
+4. Keep CI workflow as build+test gate and extend coverage threshold checks if needed.
 
-## Recommended Execution Order
+## Revised Execution Order
 
-1. Task 1
-2. Task 11
-3. Task 2 and Task 3
-4. Task 4
-5. Task 6 and Task 8
-6. Task 5
-7. Task 9
-8. Task 10 and Task 12
+1. Task 1 and Task 2
+2. Task 3 and Task 4
+3. Task 6, Task 7, and Task 8
+4. Task 5
+5. Task 9 and Task 10
+6. Task 11 and Task 12
 
-This order minimizes rework and keeps API behavior aligned with the project documents.
+This order keeps schema, persistence, and route behavior aligned before expanding feature surface.

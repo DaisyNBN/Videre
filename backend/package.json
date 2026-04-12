@@ -4,10 +4,12 @@
   "description": "",
   "main": "dist/app.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "start": "node dist/app.js",
     "dev": "nodemon --watch . --ext ts --exec \"npm run build && npm run start\"",
-    "build": "tsc"
+    "build": "tsc",
+    "ci": "npm run build && npm run test"
   },
   "keywords": [],
   "author": "",
@@ -30,6 +32,9 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^25.6.0",
-    "typescript": "^6.0.2"
+    "@types/supertest": "^7.2.0",
+    "supertest": "^7.2.2",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4"
   }
 }
