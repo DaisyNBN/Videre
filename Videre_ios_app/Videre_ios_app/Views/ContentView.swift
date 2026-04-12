@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct ContentView: View {
 
@@ -689,8 +690,9 @@ struct ContentView: View {
             return
         }
 
-        let activeMapId = APIService.shared.activeMapId ?? scan.backendMapId
-        guard let mapId = activeMapId, !mapId.isEmpty else {
+        let mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !mapId.isEmpty else {
             destinationRouteStatus = "No active map available. Scan and upload a floor first"
             return
         }
@@ -733,8 +735,9 @@ struct ContentView: View {
             return
         }
 
-        let activeMapId = APIService.shared.activeMapId ?? scan.backendMapId
-        guard let mapId = activeMapId, !mapId.isEmpty else {
+        let mapId = (APIService.shared.activeMapId ?? scan.backendMapId)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !mapId.isEmpty else {
             destinationSuggestions = []
             destinationSuggestionsStatus = "No active map for destination suggestions"
             return

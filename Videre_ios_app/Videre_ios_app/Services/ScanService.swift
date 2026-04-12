@@ -239,7 +239,7 @@ class ScanService: NSObject, ObservableObject {
             _ rot1: simd_quatf,
             _ rot2: simd_quatf) -> Float {
         let diff = simd_inverse(rot1) * rot2
-        let angleRadians = 2.0 * acos(simd_clamp(diff.w, -1.0, 1.0))
+        let angleRadians = 2.0 * acos(simd_clamp(diff.real, -1.0, 1.0))
         let angleDegrees = angleRadians * 180.0 / .pi
         return abs(angleDegrees)
     }
@@ -412,7 +412,7 @@ class ScanService: NSObject, ObservableObject {
     private func buildPayload(endedAt: Date) -> ScanPayload {
         let keyframesForUpload = constrainedKeyframesForUpload()
 
-        ScanPayload(
+        return ScanPayload(
             scanId:    scanId,
             userId:    userId,
             roomName:  roomName,
