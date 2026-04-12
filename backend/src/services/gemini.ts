@@ -1,5 +1,6 @@
 import { ImageAnnotatorClient } from "@google-cloud/vision";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { homedir } from "os";
@@ -8,8 +9,12 @@ import { getFallbackResponse } from "../fallback";
 import { NavRequest, NavResponse, Obstacle } from "../types";
 import { analyzeImageWithGeminiVision } from "./geminiVision";
 
+const featherless = new OpenAI({
+  baseURL: "https://api.featherless.ai/v1",
+  apiKey: process.env.FEATHERLESS_API_KEY ?? "",
+});
 
-const GEMINI_TIMEOUT_MS = 3000;
+const GEMINI_TIMEOUT_MS = 30000;
 const IMAGE_ANALYSIS_TIMEOUT_MS = 5000;
 const SPARSE_IMAGE_DETECTION_THRESHOLD = 2;
 const GEMINI_NAV_MIN_COOLDOWN_MS = 60_000;
@@ -214,16 +219,10 @@ export async function getGeminiNavResponse(
   request: NavRequest,
   checkpoint?: { label: string; distance: number }
 ): Promise<NavResponse> {
-  if (Date.now() < geminiNavBlockedUntil) {
-    return getFallbackResponse(request.obstacles, checkpoint);
-  }
-
   try {
-    if (!genAI) {
-      throw new Error("Missing GEMINI_API_KEY");
+    if (!process.env.FEATHERLESS_API_KEY) {
+      throw new Error("Missing FEATHERLESS_API_KEY");
     }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
     const prompt = buildPrompt(
       request.obstacles,
@@ -232,18 +231,25 @@ export async function getGeminiNavResponse(
       checkpoint
     );
 
-    // Fix 3: Timeout — a blind user can't wait 5+ seconds
-    const result = await Promise.race([
-      model.generateContent(prompt),
+    console.log("[NAV-AI] Calling Featherless AI (Qwen3-14B), timeout 30s...");
+    const completion = await Promise.race([
+      featherless.chat.completions.create({
+        model: "Qwen/Qwen3-14B",
+        max_tokens: 256,
+        messages: [
+          { role: "system", content: "You are a navigation assistant for a blind pedestrian." },
+          { role: "user", content: prompt },
+        ],
+      }),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Gemini timeout")), GEMINI_TIMEOUT_MS)
+        setTimeout(() => reject(new Error("AI timeout")), GEMINI_TIMEOUT_MS)
       ),
     ]);
 
-    const text = result.response.text();
+    const text = completion.choices[0]?.message?.content ?? "";
+    console.log("[NAV-AI] Response:", text.substring(0, 200));
     const response = parseGeminiResponse(text, checkpoint);
 
-    // Fix 1: Safety override — never let AI downgrade a critical urgency
     const blocking = request.obstacles.find(
       (o) => o.distance_estimate === "near" && o.position === "center"
     );
@@ -253,21 +259,8 @@ export async function getGeminiNavResponse(
     }
 
     return response;
-  } catch (err) {
-    if (isGeminiQuotaError(err)) {
-      const retryDelay = parseRetryDelayMs(err) ?? GEMINI_NAV_MIN_COOLDOWN_MS;
-      geminiNavBlockedUntil = Date.now() + Math.max(retryDelay, GEMINI_NAV_MIN_COOLDOWN_MS);
-
-      if (Date.now() - geminiNavLastLoggedAt > 5_000) {
-        geminiNavLastLoggedAt = Date.now();
-        console.warn(
-          `Gemini navigation temporarily paused due to quota limits. Cooldown: ${Math.ceil((geminiNavBlockedUntil - Date.now()) / 1000)}s`,
-        );
-      }
-    } else {
-      console.warn(`Gemini navigation fallback triggered: ${getErrorMessage(err)}`);
-    }
-
+  } catch (err: any) {
+    console.warn(`[NAV-AI] Fallback triggered: ${err?.message || err}`);
     return getFallbackResponse(request.obstacles, checkpoint);
   }
 }

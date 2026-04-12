@@ -24,6 +24,7 @@
     "express": "^5.2.1",
     "graphlib": "^2.1.8",
     "nodemon": "^3.1.14",
+    "openai": "^6.34.0",
     "pathfinding": "^0.4.18",
     "socket.io": "^4.8.3",
     "winston": "^3.19.0",
