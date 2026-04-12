@@ -1043,6 +1043,25 @@ struct ContentView: View {
     }
 
     private func resolveActiveMapIdForNavigation(preferredRoomName: String?) async throws -> String {
+        let trimmedPreferredRoom = preferredRoomName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let roomName = trimmedPreferredRoom,
+           !roomName.isEmpty,
+           let existing = try await APIService.shared.bootstrapFromExistingData(
+                preferredRoomName: roomName
+           ) {
+            APIService.shared.setActiveMapId(existing.map.id)
+            await MainActor.run {
+                scan.backendMapId = existing.map.id
+                scan.mapLandmarks = existing.landmarks
+                destinationRouteStatus =
+                    "Using room map \(existing.map.roomName) with \(existing.scans.count) scans"
+            }
+
+            return existing.map.id
+        }
+
         let existingMapId = (APIService.shared.activeMapId ?? scan.backendMapId)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -1053,6 +1072,7 @@ struct ContentView: View {
         if let existing = try await APIService.shared.bootstrapFromExistingData(
             preferredRoomName: preferredRoomName
         ) {
+            APIService.shared.setActiveMapId(existing.map.id)
             await MainActor.run {
                 scan.backendMapId = existing.map.id
                 scan.mapLandmarks = existing.landmarks

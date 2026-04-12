@@ -18,6 +18,10 @@ type PostgrestLikeError = {
 
 type ContributionStatus = "pending" | "accepted" | "rejected";
 
+function isUuid(value: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function isMissingSchemaError(error: PostgrestLikeError | null | undefined): boolean {
     if (!error) {
         return false;
@@ -80,18 +84,37 @@ export async function createMapContribution(input: {
 
     const status = normalizeStatus(input.status);
 
+    const rawCreatedBy =
+        typeof input.createdBy === "string" ? input.createdBy.trim() : "";
+    const createdBy = rawCreatedBy.length > 0 && isUuid(rawCreatedBy)
+        ? rawCreatedBy
+        : randomUUID();
+
+    const baseContributionPayload =
+        input.payload !== undefined && input.payload !== null
+            ? input.payload
+            : {};
+
+    let normalizedContributionPayload: unknown = baseContributionPayload;
+    if (
+        rawCreatedBy.length > 0 &&
+        !isUuid(rawCreatedBy) &&
+        typeof baseContributionPayload === "object" &&
+        baseContributionPayload !== null &&
+        !Array.isArray(baseContributionPayload)
+    ) {
+        normalizedContributionPayload = {
+            ...(baseContributionPayload as Record<string, unknown>),
+            submitted_by_label: rawCreatedBy,
+        };
+    }
+
     const payload = {
         map_id: input.mapId,
         contribution_type: contributionType,
-        payload:
-            input.payload !== undefined && input.payload !== null
-                ? input.payload
-                : {},
+        payload: normalizedContributionPayload,
         status,
-        created_by:
-            typeof input.createdBy === "string" && input.createdBy.trim().length > 0
-                ? input.createdBy
-                : randomUUID(),
+        created_by: createdBy,
         notes: typeof input.notes === "string" ? input.notes : null,
         created_at: new Date().toISOString(),
         resolved_at: status === "pending" ? null : new Date().toISOString(),

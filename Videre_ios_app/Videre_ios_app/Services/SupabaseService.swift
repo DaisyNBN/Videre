@@ -102,6 +102,18 @@ struct RouteLocalizationStatus {
     let message: String
 }
 
+private struct APIRequestError: LocalizedError {
+    let statusCode: Int
+    let message: String
+
+    var errorDescription: String? {
+        if message.isEmpty {
+            return "HTTP \(statusCode)"
+        }
+        return message
+    }
+}
+
 final class APIService {
 
     private struct RouteGeoCalibration {
@@ -916,10 +928,13 @@ final class APIService {
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
-        guard let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode)
-        else {
+        guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
+        }
+
+        guard (200...299).contains(http.statusCode) else {
+            let message = parseBackendErrorMessage(from: data) ?? "Request failed with status \(http.statusCode)"
+            throw APIRequestError(statusCode: http.statusCode, message: message)
         }
 
         guard let json = try? JSONSerialization
@@ -929,6 +944,29 @@ final class APIService {
         }
 
         return json
+    }
+
+    private func parseBackendErrorMessage(from data: Data) -> String? {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let keys = ["message", "error", "detail", "details", "reason"]
+            for key in keys {
+                if let value = json[key] as? String {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        return trimmed
+                    }
+                }
+            }
+        }
+
+        if let raw = String(data: data, encoding: .utf8) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return nil
     }
 
     private func extractApiData(_ response: [String: Any]) throws -> [String: Any] {

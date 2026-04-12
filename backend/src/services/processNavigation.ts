@@ -21,6 +21,7 @@ type PostgrestLikeError = {
 
 type RouteNodeRow = {
   id: string;
+  type: string;
   label: string | null;
   x: number;
   y: number;
@@ -275,7 +276,7 @@ async function loadRouteGraph(mapId: string): Promise<{
     await Promise.all([
       supabase
         .from("map_nodes")
-        .select("id, label, x, y, z")
+        .select("id, type, label, x, y, z")
         .eq("room_map_id", mapId),
       supabase
         .from("map_edges")
@@ -661,6 +662,38 @@ function normalizeText(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function labelsRoughlyMatch(label: string, query: string): boolean {
+  return (
+    label === query ||
+    label.startsWith(query) ||
+    label.includes(query) ||
+    query.includes(label)
+  );
+}
+
+function scoreLabelMatch(
+  label: string,
+  query: string,
+): number {
+  if (label === query) {
+    return 100;
+  }
+
+  if (label.startsWith(query)) {
+    return 85;
+  }
+
+  if (label.includes(query)) {
+    return 70;
+  }
+
+  if (query.includes(label)) {
+    return 55;
+  }
+
+  return 0;
+}
+
 function resolveNearestNodeFromPoint(
   nodesById: Map<string, RouteNodeRow>,
   point: { x: number; y: number; z?: number },
@@ -712,26 +745,11 @@ async function resolveDestinationLandmark(
     .filter((landmark) => typeof landmark.label === "string" && landmark.label.trim().length > 0)
     .filter((landmark) => {
       const label = normalizeText(landmark.label ?? "");
-      return (
-        label === query ||
-        label.startsWith(query) ||
-        label.includes(query) ||
-        query.includes(label)
-      );
+      return labelsRoughlyMatch(label, query);
     })
     .map((landmark) => {
       const label = normalizeText(landmark.label ?? "");
-      let score = 0;
-
-      if (label === query) {
-        score += 100;
-      } else if (label.startsWith(query)) {
-        score += 85;
-      } else if (label.includes(query)) {
-        score += 70;
-      } else if (query.includes(label)) {
-        score += 55;
-      }
+      let score = scoreLabelMatch(label, query);
 
       if (landmark.status === "verified") {
         score += 12;
@@ -760,6 +778,101 @@ async function resolveDestinationLandmark(
   }
 
   return candidates[0].landmark;
+}
+
+async function resolveDestinationNodeFromRoomName(
+  mapId: string,
+  destinationLabel: string,
+  nodesById: Map<string, RouteNodeRow>,
+  start: { x: number; y: number; z?: number },
+  startNodeId: string,
+  blockedNodeIds: Set<string>,
+): Promise<{
+  nodeId: string;
+  label: string;
+  type: string;
+  status: string | null;
+  confidence: number | null;
+} | undefined> {
+  const { data, error } = await supabase
+    .from("room_maps")
+    .select("room_name")
+    .eq("id", mapId)
+    .single();
+
+  if (error || !data) {
+    return undefined;
+  }
+
+  const roomName = normalizeText((data as { room_name?: string }).room_name ?? "");
+  const query = normalizeText(destinationLabel);
+  if (!roomName || !query || !labelsRoughlyMatch(roomName, query)) {
+    return undefined;
+  }
+
+  const candidates = Array.from(nodesById.values()).filter((node) => {
+    return !blockedNodeIds.has(node.id) && node.id !== startNodeId;
+  });
+
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  const labelledMatches = candidates
+    .filter((node) => typeof node.label === "string" && node.label.trim().length > 0)
+    .map((node) => {
+      const nodeLabel = normalizeText(node.label ?? "");
+      return {
+        node,
+        score: scoreLabelMatch(nodeLabel, query),
+        distance: distanceToNode(node, start),
+      };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((lhs, rhs) => {
+      if (lhs.score !== rhs.score) {
+        return rhs.score - lhs.score;
+      }
+      return lhs.distance - rhs.distance;
+    });
+
+  if (labelledMatches.length > 0) {
+    const best = labelledMatches[0].node;
+    return {
+      nodeId: best.id,
+      label: best.label ?? destinationLabel,
+      type: "room",
+      status: null,
+      confidence: null,
+    };
+  }
+
+  const endNode = candidates.find((node) => normalizeText(node.type) === "end");
+  if (endNode) {
+    return {
+      nodeId: endNode.id,
+      label: endNode.label ?? destinationLabel,
+      type: "room",
+      status: null,
+      confidence: null,
+    };
+  }
+
+  const farthest = candidates
+    .map((node) => ({ node, distance: distanceToNode(node, start) }))
+    .sort((lhs, rhs) => rhs.distance - lhs.distance)[0]?.node;
+
+  if (!farthest) {
+    return undefined;
+  }
+
+  return {
+    nodeId: farthest.id,
+    label: farthest.label ?? destinationLabel,
+    type: "room",
+    status: null,
+    confidence: null,
+  };
 }
 
 function resolveRouteNodesFromCoordinates(
@@ -918,14 +1031,64 @@ export async function generateNavigationRouteToRoom(
   );
 
   const { nodesById } = await loadRouteGraph(mapId);
-  const destinationLandmark = await resolveDestinationLandmark(mapId, destinationLabel);
   const startNode = resolveNearestNodeFromPoint(nodesById, start, blockedNodeIds);
-  const destinationNode = resolveNearestNodeFromPoint(
-    nodesById,
-    { x: destinationLandmark.x, y: destinationLandmark.y, z: destinationLandmark.z },
-    blockedNodeIds,
-    new Set([startNode.nodeId]),
-  );
+
+  let destinationNode: { nodeId: string; distance: number };
+  let destinationMetadata: {
+    landmarkId: string;
+    label: string;
+    type: string;
+    status: string | null;
+    confidence: number | null;
+  };
+
+  try {
+    const destinationLandmark = await resolveDestinationLandmark(mapId, destinationLabel);
+    destinationNode = resolveNearestNodeFromPoint(
+      nodesById,
+      { x: destinationLandmark.x, y: destinationLandmark.y, z: destinationLandmark.z },
+      blockedNodeIds,
+      new Set([startNode.nodeId]),
+    );
+
+    destinationMetadata = {
+      landmarkId: destinationLandmark.id,
+      label: destinationLandmark.label ?? destinationLabel,
+      type: destinationLandmark.type,
+      status: destinationLandmark.status,
+      confidence: destinationLandmark.confidence,
+    };
+  } catch (error) {
+    if (!(error instanceof NavigationError) || error.statusCode !== 404) {
+      throw error;
+    }
+
+    const fallback = await resolveDestinationNodeFromRoomName(
+      mapId,
+      destinationLabel,
+      nodesById,
+      start,
+      startNode.nodeId,
+      blockedNodeIds,
+    );
+
+    if (!fallback) {
+      throw error;
+    }
+
+    destinationNode = {
+      nodeId: fallback.nodeId,
+      distance: 0,
+    };
+
+    destinationMetadata = {
+      landmarkId: fallback.nodeId,
+      label: fallback.label,
+      type: fallback.type,
+      status: fallback.status,
+      confidence: fallback.confidence,
+    };
+  }
 
   const route = await generateNavigationRoute({
     mapId,
@@ -936,13 +1099,7 @@ export async function generateNavigationRouteToRoom(
 
   return {
     ...route,
-    destination: {
-      landmarkId: destinationLandmark.id,
-      label: destinationLandmark.label ?? destinationLabel,
-      type: destinationLandmark.type,
-      status: destinationLandmark.status,
-      confidence: destinationLandmark.confidence,
-    },
+    destination: destinationMetadata,
     resolvedFromCoordinates: {
       startDistance: Number(startNode.distance.toFixed(3)),
       destinationDistance: Number(destinationNode.distance.toFixed(3)),
