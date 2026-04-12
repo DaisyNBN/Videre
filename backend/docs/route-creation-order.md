@@ -33,7 +33,7 @@ Create ingestion routes before AI and maps. Everything depends on scan data.
 1. `POST /api/scans`
 
 - Create a new scan upload record.
-- Accept `ScanUploadRequest` payload (`userId`, `roomName`, `points`, `landmarks`).
+- Accept `ScanUploadRequest` payload (`roomName`, timing/device metadata, points, landmarks, keyframes, depthSamples).
 
 1. `GET /api/scans/:scanId`
 

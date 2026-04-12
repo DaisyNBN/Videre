@@ -5,7 +5,7 @@ const router = require("express").Router();
 
 router.post("/", async (req: Request, res: Response) => {
   try {
-    const { user_id, lat, lng, type, description } = req.body;
+    const { lat, lng, type, description } = req.body;
 
     if (!lat || !lng || !type) {
       res.status(400).json({ error: "Missing lat, lng, or type" });
@@ -13,7 +13,6 @@ router.post("/", async (req: Request, res: Response) => {
     }
 
     const result = await insertHazard({
-      user_id,
       lat,
       lng,
       type,
@@ -52,4 +51,4 @@ router.get("/nearby", async (req: Request, res: Response) => {
   }
 });
 
-module.exports = router;
+export default router;

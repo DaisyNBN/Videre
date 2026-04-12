@@ -1,12 +1,16 @@
 import { Request, Response } from "express";
-
+import navigationRouter from "./navigation";
+import hazardRouter from "./hazards";
+import scansRouter from "./scans";
+import mapsRouter from "./maps";
+import landmarksRouter from "./landmarks";
 const router = require("express").Router();
 
-router.use("/navigate", require("./navigation"));
-router.use("/hazards", require("./hazards"));
-router.use("/scans", require("./scans"));
-router.use("/maps", require("./maps"));
-router.use("/landmarks", require("./landmarks"));
+router.use("/navigate", navigationRouter);
+router.use("/hazards", hazardRouter);
+router.use("/scans", scansRouter);
+router.use("/maps", mapsRouter);
+router.use("/landmarks", landmarksRouter);
 
 // health check
 router.get("/health", (req: Request, res: Response) => {

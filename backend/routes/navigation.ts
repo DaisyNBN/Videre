@@ -5,7 +5,7 @@ const router = Router();
 
 router.post("/", async (req: Request, res: Response) => {
   try {
-    const { user_id, route_id, location, heading_degrees, obstacles, speed } =
+    const { route_id, location, heading_degrees, obstacles, speed } =
       req.body;
 
     if (!location || !obstacles) {
@@ -14,7 +14,6 @@ router.post("/", async (req: Request, res: Response) => {
     }
 
     const response = await getNavigationInstruction({
-      user_id,
       route_id,
       location,
       heading_degrees,

@@ -13,7 +13,6 @@ The payload is split into three groups:
 Include context needed for traceability and processing.
 
 - `scanId`: unique scan UUID
-- `userId`: user identifier
 - `roomName`: human-readable location label
 - `startedAt`: scan start timestamp
 - `endedAt`: scan end timestamp

@@ -1,5 +1,4 @@
 export type HazardReport = {
-  user_id: string;
   lat: number;
   lng: number;
   type: string;
@@ -9,7 +8,6 @@ export type HazardReport = {
 }
 
 export type NavRequest = {
-  user_id: string;
   route_id: string;
   location: { lat: number; lng: number };
   heading_degrees: number;

@@ -6,7 +6,6 @@ export async function insertHazard(
   report: HazardReport
 ): Promise<{ success: boolean; error?: string }> {
   const { error } = await supabase.from("hazard_reports").insert({
-    user_id: report.user_id,
     lat: report.lat,
     lng: report.lng,
     type: report.type,
