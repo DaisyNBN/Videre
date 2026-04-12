@@ -118,6 +118,8 @@ class ScanService: NSObject, ObservableObject {
         locationManager.distanceFilter = kCLDistanceFilterNone
         // High frequency updates for real-time display
         locationManager.activityType = .fitness
+        // Prevent iOS from batching updates or pausing when moving to background
+        locationManager.pausesLocationUpdatesAutomatically = false
     }
 
     // ── Start ─────────────────────────────────────────

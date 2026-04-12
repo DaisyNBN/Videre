@@ -35,6 +35,8 @@ final class NavigationContextService: NSObject, ObservableObject {
         manager.distanceFilter = kCLDistanceFilterNone
         // High frequency tracking for navigation
         manager.activityType = .fitness
+        // Prevent iOS from batching updates or pausing when moving to background
+        manager.pausesLocationUpdatesAutomatically = false
         if CLLocationManager.headingAvailable() {
             manager.headingFilter = 5
         }
@@ -307,6 +309,7 @@ extension NavigationContextService: CLLocationManagerDelegate {
             didUpdateLocations locations: [CLLocation]) {
 
         guard let loc = locations.last else { return }
+        // Update coordinates IMMEDIATELY on main thread for real-time display
         DispatchQueue.main.async {
             self.latitude  = loc.coordinate.latitude
             self.longitude = loc.coordinate.longitude
@@ -315,10 +318,8 @@ extension NavigationContextService: CLLocationManagerDelegate {
                 self.headingDegrees = loc.course
             }
         }
-
-        Task { @MainActor in
-            await self.refreshNearbyHazards()
-        }
+        // Note: hazard polling happens on separate timer, not on every location update
+        // This keeps coordinate updates responsive
     }
 
     func locationManager(
