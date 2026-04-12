@@ -1,0 +1,7 @@
+# Kubernetes namespace for Videre application
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: videre
+  labels:
+    name: videre

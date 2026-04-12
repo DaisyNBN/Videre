@@ -1,0 +1,38 @@
+# Kustomization file for Videre Backend
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+commonLabels:
+  app: videre
+  version: "1.0"
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - secret.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - hpa.yaml
+  - ingress.yaml
+
+images:
+  - name: videre-backend
+    newName: videre-backend
+    newTag: latest
+
+replicas:
+  - name: videre-backend
+    count: 2
+
+vars:
+  - name: FRONTEND_URL
+    objref:
+      kind: ConfigMap
+      name: videre-backend-config
+      apiVersion: v1
+    fieldref:
+      fieldpath: data.frontend_url

@@ -23,11 +23,16 @@ app.use((0, cors_1.default)({
     },
     credentials: true,
 }));
+app.use('/_health', (req, res) => {
+    res.status(200).json({ status: 'healthy' });
+});
 app.use(express_1.default.json({ limit: '10mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/api', index_1.default);
-app.use('/api/*', (_req, res) => {
-    res.status(404).json(new ApiResponse_1.ApiResponse(false, 'Route not found'));
+app.use((req, res) => {
+    if (req.path.startsWith('/api')) {
+        res.status(404).json(new ApiResponse_1.ApiResponse(false, 'Route not found'));
+    }
 });
 app.use(errorHandler_1.errorHandler);
 app.listen(PORT, () => {
