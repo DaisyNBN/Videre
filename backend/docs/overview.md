@@ -93,7 +93,7 @@ Output is converted into a structured JSON payload containing:
 
 - Scan points (Vector3 positions)
 - Landmarks (type, label, position)
-- Metadata (userId, room name)
+- Metadata (room name, device and timing info)
 
 ---
 
