@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NavRequest, NavResponse, Obstacle } from "../types";
 import { getFallbackResponse } from "../fallback";
-require("dotenv").config();
+
 
 const GEMINI_TIMEOUT_MS = 3000;
 
