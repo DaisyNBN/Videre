@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ImageAnnotatorClient } from "@google-cloud/vision";
-import { NavRequest, NavResponse, Obstacle } from "../types";
 import { getFallbackResponse } from "../fallback";
+import { NavRequest, NavResponse, Obstacle } from "../types";
 
 
 const GEMINI_TIMEOUT_MS = 3000;
@@ -99,7 +99,7 @@ export async function getGeminiNavResponse(
       throw new Error("Missing GEMINI_API_KEY");
     }
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
     const prompt = buildPrompt(
       request.obstacles,
