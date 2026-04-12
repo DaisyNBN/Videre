@@ -33,6 +33,7 @@ class ScanService: NSObject, ObservableObject {
     @Published var pointCount:    Int    = 0
     @Published var landmarkCount: Int    = 0
     @Published var keyframeCount: Int    = 0
+    @Published var waypointCount: Int    = 0 // Route waypoint count for route creation
     @Published var uploadStatus:  String = ""
     @Published var isUploading:   Bool   = false
     @Published var backendScanId: String = ""
@@ -52,6 +53,7 @@ class ScanService: NSObject, ObservableObject {
     private var landmarks:      [Landmark]        = []
     private var keyframes:      [Keyframe]        = []
     private var depthSamples:   [DepthSample]     = []
+    private var waypoints:      [Waypoint]        = [] // Route waypoints from rapid LiDAR sampling
     private var sequenceNumber: Int               = 0
     private var retryCount:     Int               = 0
 
@@ -60,6 +62,7 @@ class ScanService: NSObject, ObservableObject {
     private var lastKeyframeTime: TimeInterval = 0
     private var lastDepthTime:    TimeInterval = 0
     private var lastMeshLandmarkTime: TimeInterval = 0
+    private var lastWaypointTime: TimeInterval = 0 // For rapid LiDAR waypoint collection
 
     /// Camera pose samples for trajectory (1 Hz - one per second).
     let POINT_INTERVAL:    TimeInterval = 1.0
@@ -67,6 +70,8 @@ class ScanService: NSObject, ObservableObject {
     let KEYFRAME_INTERVAL: TimeInterval = 5.0
     let DEPTH_INTERVAL:    TimeInterval = 1.0
     private let meshLandmarkInterval: TimeInterval = 2.0
+    /// Rapid waypoint collection for route creation (0.25 seconds - 4 samples per second).
+    private let waypointInterval: TimeInterval = 0.25
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
     /// Rotation threshold to trigger new keyframe: 15 degrees.
@@ -123,6 +128,7 @@ class ScanService: NSObject, ObservableObject {
         self.landmarks      = []
         self.keyframes      = []
         self.depthSamples   = []
+        self.waypoints      = [] // Reset waypoints for new scan
         self.sequenceNumber = 0
         self.retryCount     = 0
         arkitLandmarkCentroids = []
@@ -130,6 +136,7 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframeTime       = 0
         lastDepthTime          = 0
         lastMeshLandmarkTime   = 0
+        lastWaypointTime       = 0 // Reset waypoint timing
         lastKeyframePosition   = .zero
         lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
@@ -140,6 +147,7 @@ class ScanService: NSObject, ObservableObject {
         pointCount          = 0
         landmarkCount       = 0
         keyframeCount       = 0
+        waypointCount       = 0 // Reset waypoint count
         uploadStatus        = "Scanning..."
         backendScanId       = ""
         backendMapId        = ""
@@ -228,6 +236,12 @@ class ScanService: NSObject, ObservableObject {
         if now - lastMeshLandmarkTime >= meshLandmarkInterval {
             lastMeshLandmarkTime = now
             addMeshClassificationLandmarks(frame: frame)
+        }
+
+        // Collect waypoints rapidly for route creation (4 samples per second)
+        if now - lastWaypointTime >= waypointInterval {
+            lastWaypointTime = now
+            collectWaypoint(frame: frame)
         }
     }
 
@@ -455,6 +469,42 @@ class ScanService: NSObject, ObservableObject {
         depthSamples.append(ds)
     }
 
+    // ── Collect waypoint from current LiDAR position ──────────
+    /// Rapidly collects route waypoints during scanning.
+    /// Waypoints are sampled from LiDAR/AR positioning at regular intervals (4 Hz).
+    private func collectWaypoint(frame: ARFrame) {
+        let t = frame.camera.transform
+        let ts = currentMs()
+        
+        // Get LiDAR depth confidence from latest depth sample
+        var depthConfidence: Float = 1.0
+        if let depthMap = frame.sceneDepth?.depthMap {
+            depthConfidence = min(1.0, max(0.5, Float(frame.sceneDepth?.confidence ?? 0) / 255.0))
+        }
+        
+        // Classify LiDAR point if mesh is available
+        var classification: String? = nil
+        if let classificationMap = frame.sceneDepth?.confidenceMap {
+            // Simple classification: if we have mesh data, mark as 'mapped'
+            classification = "mapped"
+        }
+        
+        let waypoint = Waypoint(
+            x: t.columns.3.x,
+            y: t.columns.3.y,
+            z: t.columns.3.z,
+            timestamp: ts,
+            depthConfidence: depthConfidence,
+            lidarClassification: classification
+        )
+        
+        waypoints.append(waypoint)
+        DispatchQueue.main.async {
+            self.waypointCount = self.waypoints.count
+        }
+        print("Waypoint collected: \(waypoint.x), \(waypoint.y), \(waypoint.z) - \(waypoints.count) waypoints total")
+    }
+
     // ── Build payload ─────────────────────────────────
     private func buildPayload(endedAt: Date) -> ScanPayload {
         let keyframesForUpload = constrainedKeyframesForUpload()
@@ -479,6 +529,8 @@ class ScanService: NSObject, ObservableObject {
             landmarks:      landmarks,
             keyframes:      keyframesForUpload,
             depthSamples:   depthSamples,
+            waypoints:      waypoints.isEmpty ? nil : waypoints, // Include waypoints if collected
+            createRouteImmediately: waypoints.isEmpty ? nil : true, // Create route from waypoints
             sequenceNumber: sequenceNumber,
             checksum:       buildChecksum(),
             offlineSync:    false,
@@ -530,9 +582,13 @@ class ScanService: NSObject, ObservableObject {
         var shouldIncrementRetry = false
 
         do {
+            // Choose endpoint based on whether we have waypoints for route creation
+            let hasWaypoints = !waypoints.isEmpty
+            let functionName = hasWaypoints ? "ingest-scan-with-route" : "ingest-scan"
+
             let result = try await APIService.shared
                 .callFunction(
-                    name:    "ingest-scan",
+                    name:    functionName,
                     payload: dict
                 )
 
@@ -613,20 +669,55 @@ class ScanService: NSObject, ObservableObject {
                 mapLandmarks = fetchedMapLandmarks
             }
 
-            let graph = try await APIService.shared.fetchMapGraph(mapId: mapId)
-            let routeId: String
-            if let coordinatePair = selectRouteCoordinates(from: points) {
-                do {
-                    routeId = try await APIService.shared.generateRouteFromCoordinates(
-                        mapId: mapId,
-                        startX: coordinatePair.start.x,
-                        startY: coordinatePair.start.y,
-                        startZ: coordinatePair.start.z,
-                        endX: coordinatePair.end.x,
-                        endY: coordinatePair.end.y,
-                        endZ: coordinatePair.end.z
-                    )
-                } catch {
+            var routeId: String?
+            
+            // Check if route was already created from waypoints
+            if let routeData = result["data"] as? [String: Any],
+               let route = routeData["route"] as? [String: Any],
+               let waypointRouteId = route["routeId"] as? String {
+                routeId = waypointRouteId
+                await MainActor.run {
+                    uploadStatus = "Route created from LiDAR waypoints (\(route["waypointCount"] ?? 0) waypoints)"
+                }
+            }
+
+            // If no route from waypoints, create one from graph
+            if routeId == nil {
+                let graph = try await APIService.shared.fetchMapGraph(mapId: mapId)
+                if let coordinatePair = selectRouteCoordinates(from: points) {
+                    do {
+                        routeId = try await APIService.shared.generateRouteFromCoordinates(
+                            mapId: mapId,
+                            startX: coordinatePair.start.x,
+                            startY: coordinatePair.start.y,
+                            startZ: coordinatePair.start.z,
+                            endX: coordinatePair.end.x,
+                            endY: coordinatePair.end.y,
+                            endZ: coordinatePair.end.z
+                        )
+                        } catch {
+                        guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
+                            finalStatus = "Map created, but graph has insufficient nodes for routing"
+                            await MainActor.run {
+                                uploadStatus = finalStatus
+                                isUploading = false
+                                sequenceNumber += 1
+                            }
+                            return
+                        }
+
+                        await MainActor.run {
+                            uploadStatus =
+                                "Coordinate route failed, falling back to node route: \(error.localizedDescription)"
+                        }
+
+                        routeId = try await APIService.shared.generateRoute(
+                            mapId: mapId,
+                            startNodeId: startNodeId,
+                            endNodeId: endNodeId
+                        )
+                    }
+                } else {
                     guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
                         finalStatus = "Map created, but graph has insufficient nodes for routing"
                         await MainActor.run {
@@ -637,40 +728,20 @@ class ScanService: NSObject, ObservableObject {
                         return
                     }
 
-                    await MainActor.run {
-                        uploadStatus =
-                            "Coordinate route failed, falling back to node route: \(error.localizedDescription)"
-                    }
-
                     routeId = try await APIService.shared.generateRoute(
                         mapId: mapId,
                         startNodeId: startNodeId,
                         endNodeId: endNodeId
                     )
                 }
-            } else {
-                guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
-                    finalStatus = "Map created, but graph has insufficient nodes for routing"
-                    await MainActor.run {
-                        uploadStatus = finalStatus
-                        isUploading = false
-                        sequenceNumber += 1
-                    }
-                    return
+            }
+
+            if let finalRouteId = routeId {
+                await MainActor.run {
+                    backendRouteId = finalRouteId
                 }
-
-                routeId = try await APIService.shared.generateRoute(
-                    mapId: mapId,
-                    startNodeId: startNodeId,
-                    endNodeId: endNodeId
-                )
+                persistAnchorReuseRecord(mapId: mapId, routeId: finalRouteId)
             }
-
-            await MainActor.run {
-                backendRouteId = routeId
-            }
-
-            persistAnchorReuseRecord(mapId: mapId, routeId: routeId)
 
             finalStatus = "Upload complete — map and route ready"
         } catch {

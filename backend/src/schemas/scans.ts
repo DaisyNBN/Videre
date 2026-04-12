@@ -52,6 +52,13 @@ const depthSampleSchema = z.object({
     depthUrl: z.string().min(1),
 });
 
+// Route waypoint collected during scanning via rapid LiDAR sampling
+const waypointSchema = vector3Schema.extend({
+    timestamp: z.number().finite(),
+    depthConfidence: z.number().finite().min(0).max(1).optional().default(1.0),
+    lidarClassification: z.string().optional(), // 'wall', 'floor', 'ceiling', 'unknown'
+});
+
 export const scanIdParamsSchema = z.object({
     id: z.string().min(1),
 });
@@ -67,5 +74,13 @@ export const scanCreateBodySchema = z.object({
     depthSamples: z.array(depthSampleSchema),
 });
 
+// Extended scan with embedded route waypoints collected during scanning
+export const scanCreateWithRouteBodySchema = scanCreateBodySchema.extend({
+    waypoints: z.array(waypointSchema).min(2, "Route must have at least start and end waypoints"),
+    createRouteImmediately: z.boolean().optional().default(true),
+});
+
 export type ScanIdParams = z.infer<typeof scanIdParamsSchema>;
 export type ScanCreateBody = z.infer<typeof scanCreateBodySchema>;
+export type Waypoint = z.infer<typeof waypointSchema>;
+export type ScanCreateWithRouteBody = z.infer<typeof scanCreateWithRouteBodySchema>;

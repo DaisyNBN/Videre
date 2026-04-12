@@ -225,6 +225,26 @@ struct ScanView: View {
                     }
                     .padding(.horizontal, 20)
 
+                    // ── Route waypoints ────────────────
+                    if scan.waypointCount > 0 {
+                        HStack(spacing: 8) {
+                            Image(systemName: "road.2")
+                                .font(.system(size: 14))
+                                .foregroundColor(.purple)
+                            Text("Route waypoints: \(scan.waypointCount)")
+                                .font(.system(
+                                    size: 13,
+                                    weight: .medium))
+                                .foregroundColor(.purple)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.purple.opacity(0.1))
+                        .cornerRadius(8)
+                        .padding(.horizontal, 20)
+                    }
+
                     // ── Add landmark ───────────────────
                     Button {
                         showLandmarkSheet = true

@@ -20,6 +20,8 @@ struct ScanPayload: Codable {
     var landmarks:         [Landmark]
     var keyframes:         [Keyframe]
     var depthSamples:      [DepthSample]
+    var waypoints:         [Waypoint]? // Route waypoints from rapid LiDAR sampling
+    var createRouteImmediately: Bool? // Whether to create route immediately from waypoints
     var sequenceNumber:    Int
     var checksum:          String
     var offlineSync:       Bool
@@ -73,6 +75,15 @@ struct DepthSample: Codable {
     var timestamp:  Int64
     var cameraPose: CameraPose
     var depthUrl:   String
+}
+
+struct Waypoint: Codable {
+    var x:                   Float
+    var y:                   Float
+    var z:                   Float
+    var timestamp:           Int64
+    var depthConfidence:     Float?
+    var lidarClassification: String?
 }
 
 struct CameraPose: Codable {
