@@ -96,8 +96,6 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframePosition   = .zero
         lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
-        lastKeyframeLidarDistance = 999.0
-        currentLidarDistance = 999.0
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
@@ -265,40 +263,51 @@ class ScanService: NSObject, ObservableObject {
         return abs(angleDegrees)
     }
 
-    // ── Get LiDAR distance at center of frame ──────────────────
+    // ── Extract center LiDAR distance from depth map ────────────
     private func getLidarCenterDistance(depthMap: CVPixelBuffer) -> Float {
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer {
             CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
         }
 
-        let width  = CVPixelBufferGetWidth(depthMap)
+        let width = CVPixelBufferGetWidth(depthMap)
         let height = CVPixelBufferGetHeight(depthMap)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
 
-        guard let base = CVPixelBufferGetBaseAddress(depthMap)
-        else { return 999.0 }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else {
+            return 999.0  // Return invalid distance
+        }
 
-        let buf    = base.assumingMemoryBound(to: Float32.self)
-        let xStart = width  / 2 - width  / 20   // Center ±5%
-        let xEnd   = width  / 2 + width  / 20
-        let yStart = height / 2 - height / 20
-        let yEnd   = height / 2 + height / 20
+        // Extract center 20% of the frame
+        let centerWidth = max(1, Int(Float(width) * 0.2))
+        let centerHeight = max(1, Int(Float(height) * 0.2))
+        let startX = (width - centerWidth) / 2
+        let startY = (height - centerHeight) / 2
 
         var centerDistances: [Float] = []
 
-        for y in yStart..<yEnd {
-            for x in xStart..<xEnd {
-                let depth = buf[y * width + x]
-                if depth > 0.1 && depth < 5.0 {
-                    centerDistances.append(depth)
+        let buffer = baseAddress.assumingMemoryBound(to: Float32.self)
+
+        for y in startY..<(startY + centerHeight) {
+            for x in startX..<(startX + centerWidth) {
+                let offset = (y * bytesPerRow / MemoryLayout<Float32>.stride) + x
+                if offset < width * height {
+                    let distance = buffer[offset]
+                    if distance > 0 && distance < 999 {  // Valid range
+                        centerDistances.append(distance)
+                    }
                 }
             }
         }
 
-        // Return median depth for center region
-        guard !centerDistances.isEmpty else { return 999.0 }
+        // Return median distance from center region
+        guard !centerDistances.isEmpty else {
+            return 999.0  // Return invalid distance
+        }
+
         centerDistances.sort()
-        return centerDistances[centerDistances.count / 2]
+        let medianIndex = centerDistances.count / 2
+        return centerDistances[medianIndex]
     }
 
     // ── Add user landmark at current position ──────────

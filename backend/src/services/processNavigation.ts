@@ -50,6 +50,21 @@ export type GenerateRouteRequest = {
   blockedNodeIds?: string[];
 };
 
+export type GenerateRouteFromCoordinatesRequest = {
+  mapId: string;
+  start: {
+    x: number;
+    y: number;
+    z?: number;
+  };
+  end: {
+    x: number;
+    y: number;
+    z?: number;
+  };
+  blockedNodeIds?: string[];
+};
+
 export type GeneratedRoute = {
   routeId: string;
   mapId: string;
@@ -75,6 +90,13 @@ export type RerouteRequest = GenerateRouteRequest & {
 export type RerouteResult = GeneratedRoute & {
   rerouted: true;
   reason: string | null;
+};
+
+type ResolvedRouteNodes = {
+  startNodeId: string;
+  endNodeId: string;
+  startDistance: number;
+  endDistance: number;
 };
 
 function isUndefinedTableOrColumn(error: PostgrestLikeError | null | undefined): boolean {
@@ -312,6 +334,65 @@ async function getNearestCheckpoint(
   return nearest;
 }
 
+function distanceToNode(
+  node: RouteNodeRow,
+  point: { x: number; y: number; z?: number },
+): number {
+  const dx = node.x - point.x;
+  const dy = node.y - point.y;
+  const dz = typeof point.z === "number" ? node.z - point.z : 0;
+  return Math.sqrt((dx * dx) + (dy * dy) + (dz * dz));
+}
+
+function resolveRouteNodesFromCoordinates(
+  nodesById: Map<string, RouteNodeRow>,
+  start: { x: number; y: number; z?: number },
+  end: { x: number; y: number; z?: number },
+  blockedNodeIds: Set<string>,
+): ResolvedRouteNodes {
+  const candidates = Array.from(nodesById.values())
+    .filter((node) => !blockedNodeIds.has(node.id));
+
+  if (candidates.length === 0) {
+    throw new NavigationError(404, "No available map nodes after blocked-node filtering");
+  }
+
+  const rankedStart = candidates
+    .map((node) => ({ node, distance: distanceToNode(node, start) }))
+    .sort((a, b) => a.distance - b.distance);
+
+  const rankedEnd = candidates
+    .map((node) => ({ node, distance: distanceToNode(node, end) }))
+    .sort((a, b) => a.distance - b.distance);
+
+  const bestStart = rankedStart[0];
+  if (!bestStart) {
+    throw new NavigationError(404, "Unable to resolve start node from map coordinates");
+  }
+
+  const bestEnd =
+    rankedEnd.find((candidate) => candidate.node.id !== bestStart.node.id)
+    ?? rankedEnd[0];
+
+  if (!bestEnd) {
+    throw new NavigationError(404, "Unable to resolve end node from map coordinates");
+  }
+
+  if (bestStart.node.id === bestEnd.node.id) {
+    throw new NavigationError(
+      400,
+      "Start and end coordinates resolved to the same node; provide farther-apart coordinates",
+    );
+  }
+
+  return {
+    startNodeId: bestStart.node.id,
+    endNodeId: bestEnd.node.id,
+    startDistance: bestStart.distance,
+    endDistance: bestEnd.distance,
+  };
+}
+
 export async function generateNavigationRoute(
   request: GenerateRouteRequest,
 ): Promise<GeneratedRoute> {
@@ -375,6 +456,48 @@ export async function generateNavigationRoute(
     nodeIds: nodePath,
     checkpoints: checkpointView,
     checkpointStorage,
+  };
+}
+
+export async function generateNavigationRouteFromCoordinates(
+  request: GenerateRouteFromCoordinatesRequest,
+): Promise<GeneratedRoute & {
+  resolvedFromCoordinates: {
+    startDistance: number;
+    endDistance: number;
+  };
+}> {
+  const { mapId, start, end } = request;
+
+  if (!mapId || !start || !end) {
+    throw new NavigationError(400, "mapId, start, and end coordinates are required");
+  }
+
+  const blockedNodeIds = new Set(
+    (request.blockedNodeIds ?? []).filter((nodeId) => typeof nodeId === "string"),
+  );
+
+  const { nodesById } = await loadRouteGraph(mapId);
+  const resolved = resolveRouteNodesFromCoordinates(
+    nodesById,
+    start,
+    end,
+    blockedNodeIds,
+  );
+
+  const route = await generateNavigationRoute({
+    mapId,
+    startNodeId: resolved.startNodeId,
+    endNodeId: resolved.endNodeId,
+    blockedNodeIds: [...blockedNodeIds],
+  });
+
+  return {
+    ...route,
+    resolvedFromCoordinates: {
+      startDistance: Number(resolved.startDistance.toFixed(3)),
+      endDistance: Number(resolved.endDistance.toFixed(3)),
+    },
   };
 }
 

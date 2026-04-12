@@ -7,17 +7,28 @@
 
 import SwiftUI
 
-struct MainTabView: View {
-    var body: some View {
-        TabView {
+private enum MainTabSelection: Hashable {
+    case navigate
+    case scan
+}
 
-            ContentView()
+struct MainTabView: View {
+    @State private var selectedTab: MainTabSelection = .navigate
+
+    var body: some View {
+        TabView(selection: $selectedTab) {
+
+            ContentView {
+                selectedTab = .scan
+            }
+                .tag(MainTabSelection.navigate)
                 .tabItem {
-                    Label("Live",
-                          systemImage: "waveform")
+                    Label("Navigate",
+                          systemImage: "location.viewfinder")
                 }
 
             ScanView()
+                .tag(MainTabSelection.scan)
                 .tabItem {
                     Label("Scan",
                           systemImage: "cube.transparent")

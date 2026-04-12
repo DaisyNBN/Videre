@@ -6,9 +6,20 @@ struct ContentView: View {
     @EnvironmentObject var lidar: LiDARService
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var navigation: NavigationContextService
+    private let openScan: () -> Void
     @State private var lastNavigationInstruction: String = ""
     @State private var lastNavigationMeta: String = ""
     @State private var showCalibrationPopup: Bool = false
+    @State private var showNavigationDebug: Bool = false
+    @State private var autoGuidanceEnabled: Bool = true
+    @State private var isGuidanceRequestInFlight: Bool = false
+    @State private var lastGuidanceRequestAt: Date = .distantPast
+    private let autoGuidanceTimer = Timer.publish(every: 4.0, on: .main, in: .common).autoconnect()
+    private let guidanceThrottleInterval: TimeInterval = 2.5
+
+    init(openScan: @escaping () -> Void = {}) {
+        self.openScan = openScan
+    }
 
     var body: some View {
         ScrollView {
@@ -47,6 +58,116 @@ struct ContentView: View {
                 .padding(.bottom, 16)
 
                 Divider()
+
+                // ── Navigation quick actions ──────────
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Navigation")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.primary)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "location.fill")
+                            .foregroundColor(.blue)
+                            .font(.system(size: 12))
+
+                        Text(activeRouteSummary)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+
+                        Spacer(minLength: 0)
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 12))
+                        Text("Nearby hazards: \(navigation.nearbyHazardsCount)")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+
+                    if !navigation.autoRerouteStatus.isEmpty {
+                        Text(navigation.autoRerouteStatus)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+
+                    Toggle(isOn: Binding(
+                        get: { appState.walkState == .walking },
+                        set: { on in
+                            appState.walkState = on ? .walking : .idle
+                        }
+                    )) {
+                        Text("Walking mode")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+
+                    Toggle(isOn: $autoGuidanceEnabled) {
+                        Text("Auto guidance")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+
+                    Text(autoGuidanceStatus)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            requestBackendGuidance(force: true)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 12))
+                                Text("Get guidance")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(Color.blue.opacity(0.15))
+                            .foregroundColor(.blue)
+                            .cornerRadius(10)
+                        }
+                        .disabled(isGuidanceRequestInFlight)
+                        .accessibilityLabel("Request guidance from backend")
+
+                        Button {
+                            openScan()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "record.circle.fill")
+                                    .font(.system(size: 12))
+                                Text("Scan room")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(Color.green.opacity(0.15))
+                            .foregroundColor(.green)
+                            .cornerRadius(10)
+                        }
+                        .accessibilityLabel("Open scan tab")
+                    }
+
+                    if !lastNavigationInstruction.isEmpty {
+                        Text(lastNavigationInstruction)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
+
+                    if !lastNavigationMeta.isEmpty {
+                        Text(lastNavigationMeta)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(3)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(Color(.systemGray6))
+                .cornerRadius(14)
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
 
                 // ── Main distance display ──────────────
                 VStack(spacing: 6) {
@@ -241,10 +362,10 @@ struct ContentView: View {
                 Divider()
                     .padding(.top, 16)
 
-                // ── Navigate API payload (matches backend NavRequest) ──
+                // ── Navigation diagnostics ───────────
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Navigate payload")
+                        Text("Navigation diagnostics")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.secondary)
                         Spacer()
@@ -254,22 +375,16 @@ struct ContentView: View {
                                    : "Show calibration popup") {
                                 showCalibrationPopup.toggle()
                             }
+                            Button(showNavigationDebug
+                                   ? "Hide payload debug"
+                                   : "Show payload debug") {
+                                showNavigationDebug.toggle()
+                            }
                         } label: {
                             Label("Debug menu", systemImage: "ellipsis.circle")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(.blue)
                         }
-                    }
-                    .padding(.horizontal, 20)
-
-                    Toggle(isOn: Binding(
-                        get: { appState.walkState == .walking },
-                        set: { on in
-                            appState.walkState = on ? .walking : .idle
-                        }
-                    )) {
-                        Text("Walking (speed in JSON)")
-                            .font(.system(size: 14))
                     }
                     .padding(.horizontal, 20)
 
@@ -280,104 +395,20 @@ struct ContentView: View {
                             .padding(.horizontal, 20)
                     }
 
-                    Text("Nearby hazards (backend): \(navigation.nearbyHazardsCount)")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 20)
-
-                    if !navigation.hazardPollStatus.isEmpty {
-                        Text(navigation.hazardPollStatus)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 20)
-                    }
-
-                    if !navigation.autoRerouteStatus.isEmpty {
-                        Text(navigation.autoRerouteStatus)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 20)
-                    }
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(navigatePayloadPretty)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.primary)
-                    }
-                    .padding(.horizontal, 20)
-
-                    Button {
-                        Task {
-                            let p = navigation.payload(
-                                ble: ble,
-                                lidar: lidar,
-                                appState: appState)
-                            do {
-                                let response = try await APIService.shared
-                                    .postNavigate(p)
-
-                                await MainActor.run {
-                                    lastNavigationInstruction = response.instruction
-                                    let fallbackText = response.fallbackUsed ? "yes" : "no"
-                                    let distanceText: String = {
-                                        guard let distance = response.distanceToNextM else {
-                                            return "n/a"
-                                        }
-                                        return String(format: "%.1f m", distance)
-                                    }()
-
-                                    lastNavigationMeta =
-                                        "Urgency: \(response.urgency), " +
-                                        "Haptic: \(response.hapticPattern), " +
-                                        "Next: \(response.nextCheckpoint ?? "none"), " +
-                                        "Distance: \(distanceText), " +
-                                        "Fallback: \(fallbackText)"
-
-                                    let priority: VoiceService.Priority =
-                                        response.urgency == "high" ? .high : .normal
-                                    VoiceService.shared.speak(
-                                        response.instruction,
-                                        priority: priority
-                                    )
-                                }
-                            } catch {
-                                await MainActor.run {
-                                    lastNavigationMeta =
-                                        "Navigation request failed: \(error.localizedDescription)"
-                                }
-                            }
+                    if showNavigationDebug {
+                        if !navigation.hazardPollStatus.isEmpty {
+                            Text(navigation.hazardPollStatus)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 20)
                         }
-                    } label: {
-                        Text("Get backend guidance")
-                            .font(.system(size: 14, weight: .medium))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(Color.blue.opacity(0.12))
-                            .cornerRadius(8)
-                    }
-                    .padding(.horizontal, 20)
-                    .accessibilityLabel("Request navigation guidance from backend")
 
-                    if let activeRouteId = APIService.shared.activeRouteId,
-                       !activeRouteId.isEmpty {
-                        Text("Active route: \(activeRouteId)")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 20)
-                    }
-
-                    if !lastNavigationInstruction.isEmpty {
-                        Text(lastNavigationInstruction)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 20)
-                    }
-
-                    if !lastNavigationMeta.isEmpty {
-                        Text(lastNavigationMeta)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 20)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(navigatePayloadPretty)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.primary)
+                        }
+                        .padding(.horizontal, 20)
                     }
                 }
                 .padding(.top, 16)
@@ -411,6 +442,17 @@ struct ContentView: View {
         .sheet(isPresented: $showCalibrationPopup) {
             CalibrationDebugPopupView(navigation: navigation)
         }
+        .onReceive(autoGuidanceTimer) { _ in
+            guard autoGuidanceEnabled else {
+                return
+            }
+
+            guard appState.walkState == .walking else {
+                return
+            }
+
+            requestBackendGuidance(force: false)
+        }
     }
 
     private var navigatePayloadPretty: String {
@@ -425,6 +467,100 @@ struct ContentView: View {
               let s = String(data: data, encoding: .utf8)
         else { return "{}" }
         return s
+    }
+
+    private var activeRouteSummary: String {
+        if let activeRouteId = APIService.shared.activeRouteId,
+           !activeRouteId.isEmpty {
+            return "Active route: \(activeRouteId)"
+        }
+
+        return "No active route. Scan a room to build one."
+    }
+
+    private var autoGuidanceStatus: String {
+        if !autoGuidanceEnabled {
+            return "Auto guidance paused"
+        }
+
+        if appState.walkState != .walking {
+            return "Auto guidance waiting for walking mode"
+        }
+
+        if APIService.shared.activeRouteId == nil {
+            return "Auto guidance waiting for active route"
+        }
+
+        if isGuidanceRequestInFlight {
+            return "Auto guidance requesting update..."
+        }
+
+        return "Auto guidance active (every 4s, throttled)"
+    }
+
+    private func requestBackendGuidance(force: Bool) {
+        guard !isGuidanceRequestInFlight else {
+            return
+        }
+
+        if !force {
+            guard APIService.shared.activeRouteId != nil else {
+                return
+            }
+
+            let elapsed = Date().timeIntervalSince(lastGuidanceRequestAt)
+            guard elapsed >= guidanceThrottleInterval else {
+                return
+            }
+        }
+
+        isGuidanceRequestInFlight = true
+        lastGuidanceRequestAt = Date()
+
+        Task {
+            let payload = navigation.payload(
+                ble: ble,
+                lidar: lidar,
+                appState: appState
+            )
+
+            do {
+                let response = try await APIService.shared.postNavigate(payload)
+
+                await MainActor.run {
+                    lastNavigationInstruction = response.instruction
+                    let fallbackText = response.fallbackUsed ? "yes" : "no"
+                    let distanceText: String = {
+                        guard let distance = response.distanceToNextM else {
+                            return "n/a"
+                        }
+                        return String(format: "%.1f m", distance)
+                    }()
+
+                    lastNavigationMeta =
+                        "Urgency: \(response.urgency), " +
+                        "Haptic: \(response.hapticPattern), " +
+                        "Next: \(response.nextCheckpoint ?? "none"), " +
+                        "Distance: \(distanceText), " +
+                        "Fallback: \(fallbackText)"
+
+                    let priority: VoiceService.Priority =
+                        response.urgency == "high" ? .high : .normal
+                    VoiceService.shared.speak(
+                        response.instruction,
+                        priority: priority
+                    )
+
+                    isGuidanceRequestInFlight = false
+                }
+            } catch {
+                await MainActor.run {
+                    lastNavigationMeta =
+                        "Navigation request failed: \(error.localizedDescription)"
+                    isGuidanceRequestInFlight = false
+                }
+            }
+        }
     }
 
     private var batteryIcon: String {

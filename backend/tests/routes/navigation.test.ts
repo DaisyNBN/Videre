@@ -4,10 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
     mockGenerateNavigationRoute,
+    mockGenerateNavigationRouteFromCoordinates,
     mockGetNavigationInstruction,
     mockRerouteNavigation,
 } = vi.hoisted(() => ({
     mockGenerateNavigationRoute: vi.fn(),
+    mockGenerateNavigationRouteFromCoordinates: vi.fn(),
     mockGetNavigationInstruction: vi.fn(),
     mockRerouteNavigation: vi.fn(),
 }));
@@ -22,6 +24,7 @@ vi.mock("../../src/services/processNavigation", () => ({
         }
     },
     generateNavigationRoute: mockGenerateNavigationRoute,
+    generateNavigationRouteFromCoordinates: mockGenerateNavigationRouteFromCoordinates,
     getNavigationInstruction: mockGetNavigationInstruction,
     rerouteNavigation: mockRerouteNavigation,
 }));
@@ -46,6 +49,7 @@ function createApp() {
 describe("navigation routes", () => {
     beforeEach(() => {
         mockGenerateNavigationRoute.mockReset();
+        mockGenerateNavigationRouteFromCoordinates.mockReset();
         mockGetNavigationInstruction.mockReset();
         mockRerouteNavigation.mockReset();
     });
@@ -124,5 +128,50 @@ describe("navigation routes", () => {
         expect(response.status).toBe(201);
         expect(response.body.success).toBe(true);
         expect(response.body.data.routeId).toBe("route-abc");
+    });
+
+    it("generates route from coordinates", async () => {
+        mockGenerateNavigationRouteFromCoordinates.mockResolvedValue({
+            routeId: "route-xyz",
+            mapId: "map-1",
+            startNodeId: "node-a",
+            endNodeId: "node-c",
+            nodeIds: ["node-a", "node-b", "node-c"],
+            checkpoints: [
+                {
+                    order: 1,
+                    nodeId: "node-a",
+                    label: "start",
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                },
+            ],
+            checkpointStorage: "in-memory",
+            resolvedFromCoordinates: {
+                startDistance: 0.124,
+                endDistance: 0.312,
+            },
+        });
+
+        const app = createApp();
+
+        const response = await request(app)
+            .post("/api/navigation/routes/from-coordinates")
+            .send({
+                mapId: "map-1",
+                start: { x: 0.1, y: 0.2 },
+                end: { x: 3.5, y: 1.4 },
+            });
+
+        expect(response.status).toBe(201);
+        expect(response.body.success).toBe(true);
+        expect(response.body.data.routeId).toBe("route-xyz");
+        expect(mockGenerateNavigationRouteFromCoordinates).toHaveBeenCalledWith({
+            mapId: "map-1",
+            start: { x: 0.1, y: 0.2 },
+            end: { x: 3.5, y: 1.4 },
+            blockedNodeIds: [],
+        });
     });
 });

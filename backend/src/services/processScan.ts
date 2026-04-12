@@ -78,6 +78,14 @@ type AIDetectionRow = {
   bbox_height: number | null;
 };
 
+const MAX_SCAN_KEYFRAMES_ANALYZED = Number.isFinite(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED))
+  ? Math.max(1, Math.trunc(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED)))
+  : 8;
+
+const MIN_KEYFRAME_ANALYSIS_INTERVAL_MS = Number.isFinite(Number(process.env.MIN_KEYFRAME_ANALYSIS_INTERVAL_MS))
+  ? Math.max(0, Math.trunc(Number(process.env.MIN_KEYFRAME_ANALYSIS_INTERVAL_MS)))
+  : 1_500;
+
 const ALLOWED_LANDMARK_TYPES: LandmarkType[] = [
   "door",
   "wall",
@@ -168,6 +176,58 @@ function parseJsonArray<T>(value: unknown): T[] {
   }
 
   return [];
+}
+
+function isAnalyzableKeyframe(keyframe: Keyframe): boolean {
+  return Boolean(
+    keyframe &&
+    typeof keyframe.imageBase64 === "string" &&
+    keyframe.imageBase64.trim().length > 0,
+  );
+}
+
+function selectKeyframesForAnalysis(keyframes: Keyframe[]): Keyframe[] {
+  const valid = keyframes.filter(isAnalyzableKeyframe);
+  if (valid.length <= 1) {
+    return valid;
+  }
+
+  const sorted = [...valid].sort(
+    (a, b) => Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0),
+  );
+
+  const spaced: Keyframe[] = [];
+  let lastAcceptedTimestamp = Number.NEGATIVE_INFINITY;
+  for (const keyframe of sorted) {
+    const timestamp = Number(keyframe.timestamp ?? 0);
+    if (
+      spaced.length === 0 ||
+      !Number.isFinite(timestamp) ||
+      timestamp - lastAcceptedTimestamp >= MIN_KEYFRAME_ANALYSIS_INTERVAL_MS
+    ) {
+      spaced.push(keyframe);
+      lastAcceptedTimestamp = timestamp;
+    }
+  }
+
+  if (spaced.length <= MAX_SCAN_KEYFRAMES_ANALYZED) {
+    return spaced;
+  }
+
+  const stride = Math.max(1, Math.ceil(spaced.length / MAX_SCAN_KEYFRAMES_ANALYZED));
+  let sampled = spaced.filter((_, index) => index % stride === 0);
+
+  const last = spaced[spaced.length - 1];
+  if (sampled[sampled.length - 1] !== last) {
+    sampled.push(last);
+  }
+
+  if (sampled.length > MAX_SCAN_KEYFRAMES_ANALYZED) {
+    sampled = sampled.slice(0, MAX_SCAN_KEYFRAMES_ANALYZED);
+    sampled[sampled.length - 1] = last;
+  }
+
+  return sampled;
 }
 
 function mapScanPointRowsToPoints(rows: ScanPointRow[]): ScanPoint[] {
@@ -472,8 +532,21 @@ export async function analyzeScanById(
     existingLandmarks = parseJsonArray<Landmark>(row.landmarks);
   }
 
-  if (keyframes.length === 0) {
+  const keyframesToAnalyze = selectKeyframesForAnalysis(keyframes);
+
+  if (keyframesToAnalyze.length === 0) {
     throw new ProcessScanError(400, "No keyframes found for analysis");
+  }
+
+  if (keyframesToAnalyze.length < keyframes.length) {
+    logger.info(
+      "Scan %s keyframe analysis budget applied: %d received, %d analyzed (max=%d, minIntervalMs=%d)",
+      scanId,
+      keyframes.length,
+      keyframesToAnalyze.length,
+      MAX_SCAN_KEYFRAMES_ANALYZED,
+      MIN_KEYFRAME_ANALYSIS_INTERVAL_MS,
+    );
   }
 
   const { error: statusError } = await supabase
@@ -525,7 +598,7 @@ export async function analyzeScanById(
   };
 
   try {
-    for (const keyframe of keyframes) {
+    for (const keyframe of keyframesToAnalyze) {
       if (
         !keyframe ||
         typeof keyframe.imageBase64 !== "string" ||
