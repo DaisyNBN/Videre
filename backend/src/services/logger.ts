@@ -24,6 +24,7 @@ export const logger = winston.createLogger({
     level: logLevel,
     format: isProduction ? prodFormat : devFormat,
     defaultMeta: { service: "videre-backend" },
+    exitOnError: false,
     transports: [new winston.transports.Console()],
     exceptionHandlers: [new winston.transports.Console()],
     rejectionHandlers: [new winston.transports.Console()],

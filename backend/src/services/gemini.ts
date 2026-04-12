@@ -1,14 +1,71 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { ImageAnnotatorClient } from "@google-cloud/vision";
+import { existsSync } from "fs";
+import { readFile } from "fs/promises";
+import { homedir } from "os";
+import { join } from "path";
 import { getFallbackResponse } from "../fallback";
 import { NavRequest, NavResponse, Obstacle } from "../types";
+import { analyzeImageWithGeminiVision } from "./geminiVision";
 
 
 const GEMINI_TIMEOUT_MS = 3000;
-const visionClient = new ImageAnnotatorClient();
+const IMAGE_ANALYSIS_TIMEOUT_MS = 5000;
+const SPARSE_IMAGE_DETECTION_THRESHOLD = 2;
+let visionClient: ImageAnnotatorClient | null = null;
+let visionUnavailableReason: string | null = null;
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
+
+function hasVisionCredentialHint(): boolean {
+  const explicitPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (explicitPath && explicitPath.trim().length > 0) {
+    return existsSync(explicitPath);
+  }
+
+  const defaultAdcPath = join(
+    homedir(),
+    ".config",
+    "gcloud",
+    "application_default_credentials.json",
+  );
+
+  if (existsSync(defaultAdcPath)) {
+    return true;
+  }
+
+  // Managed runtimes typically expose one of these env markers.
+  return Boolean(
+    process.env.K_SERVICE ||
+    process.env.GAE_ENV ||
+    process.env.FUNCTION_TARGET ||
+    process.env.GCE_METADATA_HOST ||
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCLOUD_PROJECT ||
+    process.env.GCP_PROJECT,
+  );
+}
+
+function getVisionClient(): ImageAnnotatorClient | null {
+  if (visionUnavailableReason) {
+    return null;
+  }
+
+  if (visionClient) {
+    return visionClient;
+  }
+
+  if (!hasVisionCredentialHint()) {
+    visionUnavailableReason =
+      "Vision API disabled: no credential hints found (GOOGLE_APPLICATION_CREDENTIALS, local ADC, or managed runtime identity).";
+    console.warn(visionUnavailableReason);
+    return null;
+  }
+
+  visionClient = new ImageAnnotatorClient();
+  return visionClient;
+}
 
 function buildPrompt(
   obstacles: Obstacle[],
@@ -141,13 +198,20 @@ export async function analyzeImageWithVision(
   depthData: unknown,
   cameraPose: { x: number; y: number; z: number }
 ): Promise<{ landmarks: any[]; obstacles: any[] }> {
-  // verify inputs
   if (!imageUrl) {
     throw new Error("Image URL is required");
   }
-  if (!cameraPose || typeof cameraPose.x !== "number" || typeof cameraPose.y !== "number" || typeof cameraPose.z !== "number") {
+
+  if (
+    !cameraPose ||
+    typeof cameraPose.x !== "number" ||
+    typeof cameraPose.y !== "number" ||
+    typeof cameraPose.z !== "number"
+  ) {
     throw new Error("Valid camera pose is required");
   }
+
+  const client = getVisionClient();
 
   const toPosition = (xCenter: number): "left" | "center" | "right" => {
     if (xCenter < 0.33) {
@@ -180,100 +244,225 @@ export async function analyzeImageWithVision(
     return "unknown";
   };
 
-  try {
-    const image = imageUrl.startsWith("data:")
-      ? (() => {
-        const match = imageUrl.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
-        if (!match) {
-          throw new Error("Invalid base64 data URI format");
-        }
-        return { content: match[1] };
-      })()
-      : /^https?:\/\//i.test(imageUrl)
-        ? (() => {
-          return null;
-        })()
-        : { source: { filename: imageUrl } };
+  const clampConfidence = (value: unknown): number => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return 0.5;
+    }
+    if (value < 0) return 0;
+    if (value > 1) return 1;
+    return value;
+  };
 
-    let imageRequest = image;
-    if (!imageRequest && /^https?:\/\//i.test(imageUrl)) {
+  const mergeByConfidence = <T extends { confidence?: number }>(
+    items: T[],
+    keySelector: (item: T) => string,
+  ): T[] => {
+    const byKey = new Map<string, T>();
+    for (const item of items) {
+      const key = keySelector(item);
+      const current = byKey.get(key);
+      if (!current) {
+        byKey.set(key, item);
+        continue;
+      }
+
+      const currentConfidence =
+        typeof current.confidence === "number" ? current.confidence : 0;
+      const nextConfidence =
+        typeof item.confidence === "number" ? item.confidence : 0;
+      if (nextConfidence > currentConfidence) {
+        byKey.set(key, item);
+      }
+    }
+
+    return Array.from(byKey.values());
+  };
+
+  let mimeType = "image/jpeg";
+  let imageBase64: string;
+
+  try {
+    if (imageUrl.startsWith("data:")) {
+      const match = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (!match) {
+        throw new Error("Invalid base64 data URI format");
+      }
+
+      mimeType = match[1];
+      imageBase64 = match[2];
+    } else if (/^https?:\/\//i.test(imageUrl)) {
       const imageResponse = await fetch(imageUrl);
       if (!imageResponse.ok) {
-        throw new Error(`Failed to fetch image: ${imageResponse.status} ${imageResponse.statusText}`);
+        throw new Error(
+          `Failed to fetch image: ${imageResponse.status} ${imageResponse.statusText}`,
+        );
       }
+
+      const responseMime = imageResponse.headers.get("content-type");
+      if (responseMime && responseMime.startsWith("image/")) {
+        mimeType = responseMime.split(";")[0] ?? mimeType;
+      }
+
       const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
-      imageRequest = { content: imageBuffer.toString("base64") };
+      imageBase64 = imageBuffer.toString("base64");
+    } else {
+      const imageBuffer = await readFile(imageUrl);
+      imageBase64 = imageBuffer.toString("base64");
     }
+  } catch (err) {
+    console.error("Image loading failed for analysis:", err);
+    return { landmarks: [], obstacles: [] };
+  }
 
-    if (!imageRequest) {
-      throw new Error("Unable to build image request for Vision API");
+  const imageRequest = { content: imageBase64 };
+
+  let visionLandmarks: any[] = [];
+  let visionObstacles: any[] = [];
+  let visionAttemptFailed = false;
+
+  if (client) {
+    try {
+      const [result] = await Promise.race([
+        client.annotateImage({
+          image: imageRequest,
+          features: [
+            { type: "OBJECT_LOCALIZATION" },
+            { type: "LANDMARK_DETECTION" },
+          ],
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Vision API timeout")), IMAGE_ANALYSIS_TIMEOUT_MS),
+        ),
+      ]);
+
+      const objects = result.localizedObjectAnnotations ?? [];
+      const landmarksDetected = result.landmarkAnnotations ?? [];
+
+      visionObstacles = objects.map((obj) => {
+        const vertices = obj.boundingPoly?.normalizedVertices ?? [];
+        const xs = vertices.map((v) => Number(v.x ?? 0));
+        const ys = vertices.map((v) => Number(v.y ?? 0));
+
+        const minX = xs.length ? Math.min(...xs) : 0;
+        const maxX = xs.length ? Math.max(...xs) : 0;
+        const minY = ys.length ? Math.min(...ys) : 0;
+        const maxY = ys.length ? Math.max(...ys) : 0;
+        const area = Math.max(0, maxX - minX) * Math.max(0, maxY - minY);
+        const centerX = (minX + maxX) / 2;
+
+        return {
+          label: obj.name ?? "unknown object",
+          position: toPosition(centerX),
+          distance_estimate: toDistanceEstimate(area),
+          confidence: clampConfidence(Number(obj.score ?? 0)),
+          boundingBox: {
+            x: minX,
+            y: minY,
+            width: Math.max(0, maxX - minX),
+            height: Math.max(0, maxY - minY),
+          },
+        };
+      });
+
+      visionLandmarks = landmarksDetected.map((landmark) => {
+        const latLng = landmark.locations?.[0]?.latLng;
+
+        return {
+          type: mapLandmarkType(landmark.description ?? undefined),
+          label: landmark.description ?? "unknown",
+          confidence: clampConfidence(Number(landmark.score ?? 0)),
+          source: "gemini",
+          location: latLng
+            ? {
+              latitude: Number(latLng.latitude ?? 0),
+              longitude: Number(latLng.longitude ?? 0),
+            }
+            : null,
+          cameraPose,
+          depthData: depthData ?? null,
+        };
+      });
+    } catch (err) {
+      visionAttemptFailed = true;
+      const errorMessage =
+        err instanceof Error ? err.message : "Unknown Vision API error";
+
+      if (/default credentials|metadata server|metadata lookup|auth/i.test(errorMessage)) {
+        visionUnavailableReason = `Vision API disabled after auth failure: ${errorMessage}`;
+        console.warn(visionUnavailableReason);
+      } else {
+        console.error("Vision API analysis failed:", err);
+      }
     }
+  }
 
-    const [result] = await Promise.race([
-      visionClient.annotateImage({
-        image: imageRequest,
-        features: [
-          { type: "OBJECT_LOCALIZATION" },
-          { type: "LANDMARK_DETECTION" },
-        ],
-      }),
+  const visionSignalCount = visionLandmarks.length + visionObstacles.length;
+  const shouldRunGeminiFallback = Boolean(genAI) && (
+    !client ||
+    visionAttemptFailed ||
+    visionSignalCount < SPARSE_IMAGE_DETECTION_THRESHOLD
+  );
+
+  if (!shouldRunGeminiFallback) {
+    return { landmarks: visionLandmarks, obstacles: visionObstacles };
+  }
+
+  try {
+    const geminiFallback = await Promise.race([
+      analyzeImageWithGeminiVision(imageBase64, mimeType),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Vision API timeout")), GEMINI_TIMEOUT_MS)
+        setTimeout(
+          () => reject(new Error("Gemini image analysis timeout")),
+          IMAGE_ANALYSIS_TIMEOUT_MS,
+        ),
       ),
     ]);
 
-    const objects = result.localizedObjectAnnotations ?? [];
-    const landmarksDetected = result.landmarkAnnotations ?? [];
+    const geminiLandmarks = geminiFallback.landmarks.map((landmark) => ({
+      type: mapLandmarkType(landmark.type ?? landmark.label),
+      label: landmark.label,
+      confidence: clampConfidence(landmark.confidence),
+      source: "gemini",
+      cameraPose,
+      depthData: depthData ?? null,
+    }));
 
-    const obstacles = objects.map((obj) => {
-      const vertices = obj.boundingPoly?.normalizedVertices ?? [];
-      const xs = vertices.map((v) => Number(v.x ?? 0));
-      const ys = vertices.map((v) => Number(v.y ?? 0));
+    const geminiObstacles = geminiFallback.obstacles.map((obstacle) => ({
+      label: obstacle.label,
+      confidence: clampConfidence(obstacle.confidence),
+      position: obstacle.position,
+      distance_estimate: obstacle.distance_estimate,
+      boundingBox: obstacle.boundingBox,
+    }));
 
-      const minX = xs.length ? Math.min(...xs) : 0;
-      const maxX = xs.length ? Math.max(...xs) : 0;
-      const minY = ys.length ? Math.min(...ys) : 0;
-      const maxY = ys.length ? Math.max(...ys) : 0;
-      const area = Math.max(0, maxX - minX) * Math.max(0, maxY - minY);
-      const centerX = (minX + maxX) / 2;
-
+    if (visionSignalCount === 0) {
       return {
-        label: obj.name ?? "unknown object",
-        position: toPosition(centerX),
-        distance_estimate: toDistanceEstimate(area),
-        confidence: Number(obj.score ?? 0),
-        boundingBox: {
-          x: minX,
-          y: minY,
-          width: Math.max(0, maxX - minX),
-          height: Math.max(0, maxY - minY),
+        landmarks: geminiLandmarks,
+        obstacles: geminiObstacles,
+      };
+    }
+
+    return {
+      landmarks: mergeByConfidence(
+        [...visionLandmarks, ...geminiLandmarks],
+        (landmark) => `${String(landmark.type)}:${String(landmark.label).toLowerCase()}`,
+      ),
+      obstacles: mergeByConfidence(
+        [...visionObstacles, ...geminiObstacles],
+        (obstacle) => {
+          const box = obstacle.boundingBox
+            ? `${obstacle.boundingBox.x}:${obstacle.boundingBox.y}:${obstacle.boundingBox.width}:${obstacle.boundingBox.height}`
+            : "none";
+          return `${String(obstacle.label).toLowerCase()}:${box}`;
         },
-      };
-    });
-
-    const landmarks = landmarksDetected.map((landmark) => {
-      const latLng = landmark.locations?.[0]?.latLng;
-
-      return {
-        type: mapLandmarkType(landmark.description ?? undefined),
-        label: landmark.description ?? "unknown",
-        confidence: Number(landmark.score ?? 0),
-        source: "gemini",
-        location: latLng
-          ? {
-            latitude: Number(latLng.latitude ?? 0),
-            longitude: Number(latLng.longitude ?? 0),
-          }
-          : null,
-        cameraPose,
-        depthData: depthData ?? null,
-      };
-    });
-
-    return { landmarks, obstacles };
+      ),
+    };
   } catch (err) {
-    console.error("Vision API analysis failed:", err);
-    return { landmarks: [], obstacles: [] };
+    console.error("Gemini image fallback failed:", err);
+    return {
+      landmarks: visionLandmarks,
+      obstacles: visionObstacles,
+    };
   }
 }
 

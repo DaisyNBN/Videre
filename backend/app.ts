@@ -4,6 +4,7 @@ import "dotenv/config";
 import routes from "./routes/index";
 import { ApiResponse } from "./src/ApiResponse";
 import { errorHandler } from "./src/middleware/errorHandler";
+import logger from "./src/services/logger";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -28,6 +29,17 @@ app.use('/api', (_req, res) => {
 });
 
 app.use(errorHandler);
+
+process.on("unhandledRejection", (reason) => {
+    logger.error("Unhandled promise rejection: %o", reason);
+});
+
+process.on("uncaughtException", (error) => {
+    logger.error("Uncaught exception: %o", error);
+    if (process.env.NODE_ENV === "production") {
+        process.exit(1);
+    }
+});
 
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);

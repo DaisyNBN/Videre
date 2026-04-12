@@ -133,7 +133,9 @@ function isUndefinedColumnError(error: PostgrestLikeError | null | undefined): b
   }
 
   return (
+    error.code === "PGRST204" ||
     error.code === "42703" ||
+    /could not find the '.+' column of '.+'/i.test(error.message ?? "") ||
     /column\s+.+\s+does not exist/i.test(error.message ?? "")
   );
 }
