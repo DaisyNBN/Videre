@@ -22,6 +22,7 @@ final class NavigationContextService: NSObject, ObservableObject {
 
     private let manager = CLLocationManager()
     private var hazardPollTimer: Timer?
+    private var locationPollTimer: Timer?
     private var cachedHazardObstacles: [[String: Any]] = []
     private var lastHazardSignature: String = ""
     private var isRerouteInFlight = false
@@ -49,10 +50,28 @@ final class NavigationContextService: NSObject, ObservableObject {
             manager.startUpdatingHeading()
         }
         startHazardPolling()
+        startLocationPolling()
+    }
+    
+    private func startLocationPolling() {
+        guard locationPollTimer == nil else { return }
+        // Request fresh location every 100ms for maximum polling frequency
+        locationPollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.manager.requestLocation()
+        }
+    }
+    
+    private func startLocationPolling() {
+        guard locationPollTimer == nil else { return }
+        // Request fresh location every 100ms for maximum polling frequency
+        locationPollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.manager.requestLocation()
+        }
     }
 
     deinit {
         hazardPollTimer?.invalidate()
+        locationPollTimer?.invalidate()
     }
 
     /// Mirrors `backend` `NavRequest` / your sample JSON.

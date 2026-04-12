@@ -108,6 +108,7 @@ class ScanService: NSObject, ObservableObject {
     private var didLogKeyframeBudgetReached = false
     private let locationManager = CLLocationManager()
     private var lastKnownLocation: CLLocation?
+    private var locationPollTimer: Timer?
 
     override init() {
         super.init()
@@ -127,6 +128,7 @@ class ScanService: NSObject, ObservableObject {
             roomName: String,
             userId: String = DeviceIdentity.userId) {
         startLocationTrackingIfNeeded()
+        startLocationPolling()
         if let currentLocation = locationManager.location {
             lastKnownLocation = currentLocation
         }
@@ -174,6 +176,8 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Stop and upload ───────────────────────────────
     func stopScan() {
+        locationPollTimer?.invalidate()
+        locationPollTimer = nil
         guard isScanning else { return }
 
         if landmarks.isEmpty {
@@ -970,6 +974,14 @@ class ScanService: NSObject, ObservableObject {
             locationManager.startUpdatingLocation()
         default:
             break
+        }
+    }
+    
+    private func startLocationPolling() {
+        guard locationPollTimer == nil else { return }
+        // Request fresh location every 100ms for maximum polling frequency
+        locationPollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.locationManager.requestLocation()
         }
     }
 
