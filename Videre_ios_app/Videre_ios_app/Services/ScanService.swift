@@ -54,13 +54,10 @@ class ScanService: NSObject, ObservableObject {
     private let meshLandmarkInterval: TimeInterval = 2.0
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
-    /// Rotation threshold to trigger new keyframe: 180 degrees (face opposite direction).
-    private let rotationThresholdDegrees: Float = 180.0
-    /// Position change threshold: 0.5 meters.
-    private let positionChangeThreshold: Float = 0.5
-    /// LiDAR distance threshold to trigger new keyframe: significant depth change.
-    private let lidarDistanceThreshold: Float = 0.3  // 30cm depth change
-
+    /// Rotation threshold to trigger new keyframe: 270 degrees (nearly full rotation).
+    private let rotationThresholdDegrees: Float = 270.0
+    /// Position change threshold: 1.5 meters (only capture when user walks significantly further).
+    private let positionChangeThreshold: Float = 1.5
     /// Dedupe ARKit mesh landmarks (meters).
     private var arkitLandmarkCentroids: [simd_float3] = []
     private let arkitLandmarkMinSpacing: Float = 1.0
@@ -71,8 +68,6 @@ class ScanService: NSObject, ObservableObject {
     private var lastKeyframePosition: simd_float3 = .zero
     private var lastKeyframeRotation: simd_quatf = simd_quatf()
     private var lastKeyframeCacheClearTime: Date = Date()
-    private var lastKeyframeLidarDistance: Float = 999.0
-    private var currentLidarDistance: Float = 999.0
 
     // ── Start ─────────────────────────────────────────
     func startScan(
@@ -96,8 +91,6 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframePosition   = .zero
         lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
-        lastKeyframeLidarDistance = 999.0
-        currentLidarDistance = 999.0
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
@@ -152,11 +145,6 @@ class ScanService: NSObject, ObservableObject {
             t.columns.3.z
         )
 
-        // Get current LiDAR depth from frame if available
-        if let depthMap = frame.sceneDepth?.depthMap {
-            currentLidarDistance = getLidarCenterDistance(depthMap: depthMap)
-        }
-
         let now = frame.timestamp
 
         // Always record trajectory points for better LiDAR coverage
@@ -165,18 +153,16 @@ class ScanService: NSObject, ObservableObject {
             addPoint(frame: frame)
         }
 
-        // Capture keyframes only when environment changes
+        // Capture keyframes only when position changes or user rotates 180 degrees
         let cameraRotation = simd_quatf(frame.camera.transform)
         if shouldCaptureNewKeyframe(
             newPosition: currentPosition,
             newRotation: cameraRotation,
-            newLidarDistance: currentLidarDistance,
             lastTime: lastKeyframeTime,
             now: now) {
             lastKeyframeTime = now
             lastKeyframePosition = currentPosition
             lastKeyframeRotation = cameraRotation
-            lastKeyframeLidarDistance = currentLidarDistance
             captureKeyframe(frame: frame)
         }
 
@@ -201,7 +187,6 @@ class ScanService: NSObject, ObservableObject {
     private func shouldCaptureNewKeyframe(
             newPosition: simd_float3,
             newRotation: simd_quatf,
-            newLidarDistance: Float,
             lastTime: TimeInterval,
             now: TimeInterval) -> Bool {
         
@@ -221,7 +206,7 @@ class ScanService: NSObject, ObservableObject {
         }
 
         // Check rotation change (180 degrees threshold)
-        // Trigger when facing opposite direction for interior mapping
+        // Trigger when significant rotation in any direction: horizontal, vertical, or roll
         let rotationDiff = rotationAngleDifference(
             lastKeyframeRotation,
             newRotation)
@@ -248,6 +233,7 @@ class ScanService: NSObject, ObservableObject {
     }
 
     // ── Calculate angle between two rotations ─────────────────
+    // Considers all rotation directions: horizontal (yaw), vertical (pitch), and roll
     private func rotationAngleDifference(
             _ rot1: simd_quatf,
             _ rot2: simd_quatf) -> Float {
@@ -255,51 +241,6 @@ class ScanService: NSObject, ObservableObject {
         let angleRadians = 2.0 * acos(simd_clamp(diff.w, -1.0, 1.0))
         let angleDegrees = angleRadians * 180.0 / .pi
         return abs(angleDegrees)
-    }
-
-    // ── Extract center LiDAR distance from depth map ────────────
-    private func getLidarCenterDistance(depthMap: CVPixelBuffer) -> Float {
-        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        defer {
-            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
-        }
-
-        let width = CVPixelBufferGetWidth(depthMap)
-        let height = CVPixelBufferGetHeight(depthMap)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
-        let elementsPerRow = bytesPerRow / MemoryLayout<Float32>.stride
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else {
-            return 999.0  // Return invalid distance
-        }
-
-        // Extract center 20% of the frame
-        let centerWidth = max(1, Int(Float(width) * 0.2))
-        let centerHeight = max(1, Int(Float(height) * 0.2))
-        let startX = (width - centerWidth) / 2
-        let startY = (height - centerHeight) / 2
-
-        var centerDistances: [Float] = []
-        let buffer = baseAddress.assumingMemoryBound(to: Float32.self)
-
-        for y in startY..<min(startY + centerHeight, height) {
-            for x in startX..<min(startX + centerWidth, width) {
-                let offset = y * elementsPerRow + x
-                let distance = buffer[offset]
-                if distance > 0 && distance < 999 {  // Valid range
-                    centerDistances.append(distance)
-                }
-            }
-        }
-
-        // Return median distance from center region
-        guard !centerDistances.isEmpty else {
-            return 999.0  // Return invalid distance
-        }
-
-        centerDistances.sort()
-        let medianIndex = centerDistances.count / 2
-        return centerDistances[medianIndex]
     }
 
     // ── Add user landmark at current position ──────────
