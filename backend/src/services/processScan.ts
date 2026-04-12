@@ -60,6 +60,11 @@ type ScanLandmarkRow = {
   x: number;
   y: number;
   z: number;
+  heading_degrees?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  horizontal_accuracy?: number | null;
+  vertical_accuracy?: number | null;
 };
 
 type ScanPointRow = {
@@ -67,6 +72,12 @@ type ScanPointRow = {
   x: number;
   y: number;
   z: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  horizontal_accuracy?: number | null;
+  vertical_accuracy?: number | null;
+  heading_degrees?: number | null;
+  tracking_state?: string | null;
 };
 
 type AIDetectionRow = {
@@ -97,6 +108,10 @@ type ScanListSchemaMode = "unknown" | "legacy" | "created_at";
 
 let scanListSchemaMode: ScanListSchemaMode = "unknown";
 let hasLoggedScanListCreatedAtFallback = false;
+
+type SpatialColumnMode = "unknown" | "extended" | "minimal";
+let scanPointSpatialColumnsMode: SpatialColumnMode = "unknown";
+let scanLandmarkSpatialColumnsMode: SpatialColumnMode = "unknown";
 
 const MAX_SCAN_KEYFRAMES_ANALYZED = Number.isFinite(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED))
   ? Math.max(1, Math.trunc(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED)))
@@ -140,6 +155,19 @@ function clampConfidence(value: unknown): number | null {
     return 1;
   }
   return value;
+}
+
+function normalizeHeadingDegrees(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  let normalized = value % 360;
+  if (normalized < 0) {
+    normalized += 360;
+  }
+
+  return normalized;
 }
 
 function toLandmarkType(value: unknown): LandmarkType {
@@ -259,6 +287,27 @@ function mapScanPointRowsToPoints(rows: ScanPointRow[]): ScanPoint[] {
       typeof row.timestamp_ms === "number" && Number.isFinite(row.timestamp_ms)
         ? row.timestamp_ms
         : undefined,
+    latitude:
+      typeof row.latitude === "number" && Number.isFinite(row.latitude)
+        ? row.latitude
+        : undefined,
+    longitude:
+      typeof row.longitude === "number" && Number.isFinite(row.longitude)
+        ? row.longitude
+        : undefined,
+    horizontalAccuracy:
+      typeof row.horizontal_accuracy === "number" && Number.isFinite(row.horizontal_accuracy)
+        ? Math.max(0, row.horizontal_accuracy)
+        : undefined,
+    verticalAccuracy:
+      typeof row.vertical_accuracy === "number" && Number.isFinite(row.vertical_accuracy)
+        ? Math.max(0, row.vertical_accuracy)
+        : undefined,
+    headingDegrees: normalizeHeadingDegrees(row.heading_degrees) ?? undefined,
+    trackingState:
+      typeof row.tracking_state === "string" && row.tracking_state.trim().length > 0
+        ? row.tracking_state
+        : undefined,
   }));
 }
 
@@ -271,6 +320,23 @@ function mapScanLandmarkRowsToLandmarks(rows: ScanLandmarkRow[]): Landmark[] {
     x: asNumber(row.x),
     y: asNumber(row.y),
     z: asNumber(row.z),
+    headingDegrees: normalizeHeadingDegrees(row.heading_degrees) ?? undefined,
+    latitude:
+      typeof row.latitude === "number" && Number.isFinite(row.latitude)
+        ? row.latitude
+        : undefined,
+    longitude:
+      typeof row.longitude === "number" && Number.isFinite(row.longitude)
+        ? row.longitude
+        : undefined,
+    horizontalAccuracy:
+      typeof row.horizontal_accuracy === "number" && Number.isFinite(row.horizontal_accuracy)
+        ? Math.max(0, row.horizontal_accuracy)
+        : undefined,
+    verticalAccuracy:
+      typeof row.vertical_accuracy === "number" && Number.isFinite(row.vertical_accuracy)
+        ? Math.max(0, row.vertical_accuracy)
+        : undefined,
   }));
 }
 
@@ -420,10 +486,43 @@ async function saveLegacyScanPayload(
 }
 
 async function readNormalizedScanLandmarks(scanId: string): Promise<Landmark[]> {
-  const { data, error } = await supabase
-    .from("scan_landmarks")
-    .select("type, label, confidence, source, x, y, z")
-    .eq("scan_id", scanId);
+  const runExtendedQuery = () => {
+    return supabase
+      .from("scan_landmarks")
+      .select(
+        "type, label, confidence, source, x, y, z, heading_degrees, latitude, longitude, horizontal_accuracy, vertical_accuracy",
+      )
+      .eq("scan_id", scanId);
+  };
+
+  const runMinimalQuery = () => {
+    return supabase
+      .from("scan_landmarks")
+      .select("type, label, confidence, source, x, y, z")
+      .eq("scan_id", scanId);
+  };
+
+  let data: unknown[] | null = null;
+  let error: PostgrestLikeError | null = null;
+
+  if (scanLandmarkSpatialColumnsMode === "minimal") {
+    const result = await runMinimalQuery();
+    data = result.data;
+    error = result.error;
+  } else {
+    const result = await runExtendedQuery();
+    data = result.data;
+    error = result.error;
+
+    if (error && isUndefinedColumnError(error)) {
+      scanLandmarkSpatialColumnsMode = "minimal";
+      const fallbackResult = await runMinimalQuery();
+      data = fallbackResult.data;
+      error = fallbackResult.error;
+    } else if (!error) {
+      scanLandmarkSpatialColumnsMode = "extended";
+    }
+  }
 
   if (error) {
     if (isUndefinedTableError(error)) {
@@ -439,11 +538,45 @@ async function readNormalizedScanLandmarks(scanId: string): Promise<Landmark[]> 
 }
 
 async function readNormalizedScanPoints(scanId: string): Promise<ScanPoint[]> {
-  const { data, error } = await supabase
-    .from("scan_points")
-    .select("timestamp_ms, x, y, z")
-    .eq("scan_id", scanId)
-    .order("id", { ascending: true });
+  const runExtendedQuery = () => {
+    return supabase
+      .from("scan_points")
+      .select(
+        "timestamp_ms, x, y, z, latitude, longitude, horizontal_accuracy, vertical_accuracy, heading_degrees, tracking_state",
+      )
+      .eq("scan_id", scanId)
+      .order("id", { ascending: true });
+  };
+
+  const runMinimalQuery = () => {
+    return supabase
+      .from("scan_points")
+      .select("timestamp_ms, x, y, z")
+      .eq("scan_id", scanId)
+      .order("id", { ascending: true });
+  };
+
+  let data: unknown[] | null = null;
+  let error: PostgrestLikeError | null = null;
+
+  if (scanPointSpatialColumnsMode === "minimal") {
+    const result = await runMinimalQuery();
+    data = result.data;
+    error = result.error;
+  } else {
+    const result = await runExtendedQuery();
+    data = result.data;
+    error = result.error;
+
+    if (error && isUndefinedColumnError(error)) {
+      scanPointSpatialColumnsMode = "minimal";
+      const fallbackResult = await runMinimalQuery();
+      data = fallbackResult.data;
+      error = fallbackResult.error;
+    } else if (!error) {
+      scanPointSpatialColumnsMode = "extended";
+    }
+  }
 
   if (error) {
     if (isUndefinedTableError(error)) {
@@ -479,7 +612,7 @@ export async function createScan(request: ScanUploadRequest): Promise<string> {
     throw new ProcessScanError(500, "Scan created but ID was not returned");
   }
 
-  const pointRows = request.points.map((point) => ({
+  const pointRowsMinimal = request.points.map((point) => ({
     scan_id: scanId,
     timestamp_ms:
       typeof point.timestamp === "number" && Number.isFinite(point.timestamp)
@@ -490,13 +623,54 @@ export async function createScan(request: ScanUploadRequest): Promise<string> {
     z: point.z,
   }));
 
-  const { error: pointError } = await supabase.from("scan_points").insert(pointRows);
+  const pointRowsExtended = request.points.map((point, index) => ({
+    ...pointRowsMinimal[index],
+    latitude:
+      typeof point.latitude === "number" && Number.isFinite(point.latitude)
+        ? point.latitude
+        : null,
+    longitude:
+      typeof point.longitude === "number" && Number.isFinite(point.longitude)
+        ? point.longitude
+        : null,
+    horizontal_accuracy:
+      typeof point.horizontalAccuracy === "number" && Number.isFinite(point.horizontalAccuracy)
+        ? Math.max(0, point.horizontalAccuracy)
+        : null,
+    vertical_accuracy:
+      typeof point.verticalAccuracy === "number" && Number.isFinite(point.verticalAccuracy)
+        ? Math.max(0, point.verticalAccuracy)
+        : null,
+    heading_degrees: normalizeHeadingDegrees(point.headingDegrees),
+    tracking_state:
+      typeof point.trackingState === "string" && point.trackingState.trim().length > 0
+        ? point.trackingState
+        : null,
+  }));
+
+  let pointError: PostgrestLikeError | null = null;
+  if (scanPointSpatialColumnsMode === "minimal") {
+    const result = await supabase.from("scan_points").insert(pointRowsMinimal);
+    pointError = result.error;
+  } else {
+    let result = await supabase.from("scan_points").insert(pointRowsExtended);
+    pointError = result.error;
+
+    if (pointError && isUndefinedColumnError(pointError)) {
+      scanPointSpatialColumnsMode = "minimal";
+      result = await supabase.from("scan_points").insert(pointRowsMinimal);
+      pointError = result.error;
+    } else if (!pointError) {
+      scanPointSpatialColumnsMode = "extended";
+    }
+  }
+
   if (pointError) {
     logger.error("Error inserting scan points: %o", pointError);
     throw new ProcessScanError(500, "Failed to save scan points");
   }
 
-  const landmarkRows = request.landmarks.map((landmark) => ({
+  const landmarkRowsMinimal = request.landmarks.map((landmark) => ({
     scan_id: scanId,
     type: toLandmarkType(landmark.type),
     label: landmark.label ?? null,
@@ -507,9 +681,43 @@ export async function createScan(request: ScanUploadRequest): Promise<string> {
     z: landmark.z,
   }));
 
-  const { error: landmarkError } = await supabase
-    .from("scan_landmarks")
-    .insert(landmarkRows);
+  const landmarkRowsExtended = request.landmarks.map((landmark, index) => ({
+    ...landmarkRowsMinimal[index],
+    heading_degrees: normalizeHeadingDegrees(landmark.headingDegrees),
+    latitude:
+      typeof landmark.latitude === "number" && Number.isFinite(landmark.latitude)
+        ? landmark.latitude
+        : null,
+    longitude:
+      typeof landmark.longitude === "number" && Number.isFinite(landmark.longitude)
+        ? landmark.longitude
+        : null,
+    horizontal_accuracy:
+      typeof landmark.horizontalAccuracy === "number" && Number.isFinite(landmark.horizontalAccuracy)
+        ? Math.max(0, landmark.horizontalAccuracy)
+        : null,
+    vertical_accuracy:
+      typeof landmark.verticalAccuracy === "number" && Number.isFinite(landmark.verticalAccuracy)
+        ? Math.max(0, landmark.verticalAccuracy)
+        : null,
+  }));
+
+  let landmarkError: PostgrestLikeError | null = null;
+  if (scanLandmarkSpatialColumnsMode === "minimal") {
+    const result = await supabase.from("scan_landmarks").insert(landmarkRowsMinimal);
+    landmarkError = result.error;
+  } else {
+    let result = await supabase.from("scan_landmarks").insert(landmarkRowsExtended);
+    landmarkError = result.error;
+
+    if (landmarkError && isUndefinedColumnError(landmarkError)) {
+      scanLandmarkSpatialColumnsMode = "minimal";
+      result = await supabase.from("scan_landmarks").insert(landmarkRowsMinimal);
+      landmarkError = result.error;
+    } else if (!landmarkError) {
+      scanLandmarkSpatialColumnsMode = "extended";
+    }
+  }
 
   if (landmarkError) {
     logger.error("Error inserting scan landmarks: %o", landmarkError);

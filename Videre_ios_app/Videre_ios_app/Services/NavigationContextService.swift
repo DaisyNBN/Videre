@@ -81,6 +81,7 @@ final class NavigationContextService: NSObject, ObservableObject {
         )
 
         let selectedRouteId = APIService.shared.activeRouteId ?? routeId
+        let selectedMapId = APIService.shared.activeMapId ?? scan.backendMapId
         let speed: String =
             appState.walkState == .walking ? "walking" : "stopped"
         var obstacles = Self.buildObstacles(
@@ -97,6 +98,7 @@ final class NavigationContextService: NSObject, ObservableObject {
         return [
             "user_id":         DeviceIdentity.userId,
             "route_id":        selectedRouteId,
+            "map_id":          selectedMapId,
             "location":        [
                 "lat": latitude,
                 "lng": longitude

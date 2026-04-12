@@ -31,6 +31,12 @@ const deviceInfoSchema = z.object({
 
 const scanPointSchema = vector3Schema.extend({
     timestamp: z.number().finite().optional(),
+    latitude: z.number().finite().optional(),
+    longitude: z.number().finite().optional(),
+    horizontalAccuracy: z.number().finite().nonnegative().optional(),
+    verticalAccuracy: z.number().finite().nonnegative().optional(),
+    headingDegrees: z.number().finite().min(0).max(360).optional(),
+    trackingState: z.string().optional(),
 });
 
 const landmarkSchema = vector3Schema.extend({
@@ -38,6 +44,12 @@ const landmarkSchema = vector3Schema.extend({
     label: z.string().optional(),
     confidence: z.number().finite().min(0).max(1).optional(),
     source: z.enum(["user", "gemini"]).optional(),
+    timestamp: z.number().finite().optional(),
+    headingDegrees: z.number().finite().min(0).max(360).optional(),
+    latitude: z.number().finite().optional(),
+    longitude: z.number().finite().optional(),
+    horizontalAccuracy: z.number().finite().nonnegative().optional(),
+    verticalAccuracy: z.number().finite().nonnegative().optional(),
 });
 
 const keyframeSchema = z.object({

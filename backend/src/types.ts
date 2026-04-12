@@ -9,6 +9,7 @@ export type HazardReport = {
 
 export type NavRequest = {
   route_id: string;
+  map_id?: string;
   location: { lat: number; lng: number };
   map_position?: { x: number; y: number; z?: number };
   heading_degrees: number;
@@ -46,6 +47,12 @@ export type Vector3 = {
 // ==============================
 export type ScanPoint = Vector3 & {
   timestamp?: number;
+  latitude?: number;
+  longitude?: number;
+  horizontalAccuracy?: number;
+  verticalAccuracy?: number;
+  headingDegrees?: number;
+  trackingState?: string;
 };
 
 // ==============================
@@ -66,6 +73,12 @@ export type Landmark = Vector3 & {
   label?: string;
   confidence?: number;
   source?: "user" | "gemini";
+  timestamp?: number;
+  headingDegrees?: number;
+  latitude?: number;
+  longitude?: number;
+  horizontalAccuracy?: number;
+  verticalAccuracy?: number;
 };
 
 // ==============================

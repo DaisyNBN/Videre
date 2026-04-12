@@ -61,6 +61,7 @@ export const mapCreateLandmarkBodySchema = z.object({
     x: z.number().finite(),
     y: z.number().finite(),
     z: z.number().finite(),
+    headingDegrees: z.number().finite().min(0).max(360).optional(),
     source: z.enum(["user", "gemini"]).optional(),
     confidence: z.number().finite().min(0).max(1).optional(),
 });
@@ -71,6 +72,7 @@ export const mapUpdateLandmarkBodySchema = z.object({
     x: z.number().finite().optional(),
     y: z.number().finite().optional(),
     z: z.number().finite().optional(),
+    headingDegrees: z.number().finite().min(0).max(360).optional(),
     source: z.enum(["user", "gemini"]).optional(),
 });
 

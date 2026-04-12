@@ -21,6 +21,7 @@ type LandmarkRow = {
     x: number;
     y: number;
     z: number;
+    heading_degrees?: number | null;
     status: VerificationStatus;
     created_at: string;
 };
@@ -49,6 +50,9 @@ const VERIFICATION_STATUSES: VerificationStatus[] = [
     "verified",
     "rejected",
 ];
+
+type LandmarkHeadingColumnMode = "unknown" | "available" | "missing";
+let landmarkHeadingColumnMode: LandmarkHeadingColumnMode = "unknown";
 
 function toLandmarkType(value: unknown): LandmarkType {
     if (typeof value !== "string") {
@@ -81,6 +85,32 @@ function asNumber(value: unknown, fallback = 0): number {
     }
 
     return fallback;
+}
+
+function normalizeHeadingDegrees(value: unknown): number | null {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+        return null;
+    }
+
+    let normalized = value % 360;
+    if (normalized < 0) {
+        normalized += 360;
+    }
+
+    return normalized;
+}
+
+function isUndefinedColumnError(error: { code?: string; message?: string } | null | undefined): boolean {
+    if (!error) {
+        return false;
+    }
+
+    return (
+        error.code === "PGRST204" ||
+        error.code === "42703" ||
+        /could not find the '.+' column of '.+'/i.test(error.message ?? "") ||
+        /column\s+.+\s+does not exist/i.test(error.message ?? "")
+    );
 }
 
 async function ensureMapExists(mapId: string): Promise<void> {
@@ -153,12 +183,15 @@ export async function createMapLandmark(input: {
     x: unknown;
     y: unknown;
     z: unknown;
+    headingDegrees?: unknown;
     source?: unknown;
     confidence?: unknown;
 }): Promise<LandmarkRow> {
     await ensureMapExists(input.mapId);
 
-    const payload = {
+    const headingDegrees = normalizeHeadingDegrees(input.headingDegrees);
+
+    const payload: Record<string, unknown> = {
         room_map_id: input.mapId,
         type: toLandmarkType(input.type),
         label: typeof input.label === "string" ? input.label : null,
@@ -173,11 +206,33 @@ export async function createMapLandmark(input: {
         status: "pending" as VerificationStatus,
     };
 
-    const { data, error } = await supabase
+    if (headingDegrees !== null && landmarkHeadingColumnMode !== "missing") {
+        payload.heading_degrees = headingDegrees;
+    }
+
+    let { data, error } = await supabase
         .from("landmarks")
         .insert(payload)
         .select("*")
         .single();
+
+    if (error && payload.heading_degrees !== undefined && isUndefinedColumnError(error)) {
+        landmarkHeadingColumnMode = "missing";
+        delete payload.heading_degrees;
+
+        const retry = await supabase
+            .from("landmarks")
+            .insert(payload)
+            .select("*")
+            .single();
+
+        data = retry.data;
+        error = retry.error;
+    }
+
+    if (!error && payload.heading_degrees !== undefined) {
+        landmarkHeadingColumnMode = "available";
+    }
 
     if (error || !data) {
         throw new ProcessLandmarkError(500, "Failed to create landmark");
@@ -210,6 +265,7 @@ export async function updateMapLandmark(input: {
     x?: unknown;
     y?: unknown;
     z?: unknown;
+    headingDegrees?: unknown;
     source?: unknown;
 }): Promise<LandmarkRow> {
     await ensureMapExists(input.mapId);
@@ -241,17 +297,42 @@ export async function updateMapLandmark(input: {
         patch.z = asNumber(input.z, existing.z);
     }
 
+    if (input.headingDegrees !== undefined && landmarkHeadingColumnMode !== "missing") {
+        patch.heading_degrees = normalizeHeadingDegrees(input.headingDegrees);
+    }
+
     if (input.source !== undefined) {
         patch.source = input.source === "gemini" ? "gemini" : "user";
     }
 
-    const { data, error } = await supabase
-        .from("landmarks")
-        .update(patch)
-        .eq("id", input.landmarkId)
-        .eq("room_map_id", input.mapId)
-        .select("*")
-        .single();
+    const runUpdate = () => {
+        return supabase
+            .from("landmarks")
+            .update(patch)
+            .eq("id", input.landmarkId)
+            .eq("room_map_id", input.mapId)
+            .select("*")
+            .single();
+    };
+
+    let { data, error } = await runUpdate();
+
+    if (error && patch.heading_degrees !== undefined && isUndefinedColumnError(error)) {
+        landmarkHeadingColumnMode = "missing";
+        delete patch.heading_degrees;
+
+        if (Object.keys(patch).length === 0) {
+            return existing;
+        }
+
+        const retry = await runUpdate();
+        data = retry.data;
+        error = retry.error;
+    }
+
+    if (!error && patch.heading_degrees !== undefined) {
+        landmarkHeadingColumnMode = "available";
+    }
 
     if (error || !data) {
         throw new ProcessLandmarkError(500, "Failed to update landmark");

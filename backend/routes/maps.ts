@@ -183,6 +183,7 @@ router.post(
         x: body.x,
         y: body.y,
         z: body.z,
+        headingDegrees: body.headingDegrees,
         source: body.source,
         confidence: body.confidence,
       });
@@ -242,6 +243,7 @@ router.patch(
         x: body.x,
         y: body.y,
         z: body.z,
+        headingDegrees: body.headingDegrees,
         source: body.source,
       });
 

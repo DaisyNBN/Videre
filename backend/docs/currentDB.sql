@@ -49,6 +49,7 @@ CREATE TABLE public.landmarks (
     x double precision NOT NULL,
     y double precision NOT NULL,
     z double precision NOT NULL,
+    heading_degrees double precision,
     status USER - DEFINED NOT NULL DEFAULT 'pending'::verification_status,
     created_at timestamp with time zone NOT NULL DEFAULT now(),
     CONSTRAINT landmarks_pkey PRIMARY KEY (id),
@@ -108,6 +109,11 @@ CREATE TABLE public.scan_landmarks (
     x double precision NOT NULL,
     y double precision NOT NULL,
     z double precision NOT NULL,
+    heading_degrees double precision,
+    latitude double precision,
+    longitude double precision,
+    horizontal_accuracy double precision,
+    vertical_accuracy double precision,
     CONSTRAINT scan_landmarks_pkey PRIMARY KEY (id),
     CONSTRAINT scan_landmarks_scan_id_fkey FOREIGN KEY (scan_id) REFERENCES public.scans(id)
 );
@@ -118,6 +124,12 @@ CREATE TABLE public.scan_points (
     x double precision NOT NULL,
     y double precision NOT NULL,
     z double precision NOT NULL,
+    latitude double precision,
+    longitude double precision,
+    horizontal_accuracy double precision,
+    vertical_accuracy double precision,
+    heading_degrees double precision,
+    tracking_state text,
     CONSTRAINT scan_points_pkey PRIMARY KEY (id),
     CONSTRAINT scan_points_scan_id_fkey FOREIGN KEY (scan_id) REFERENCES public.scans(id)
 );

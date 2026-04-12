@@ -34,6 +34,7 @@ function buildInstructionRequest(body: NavigationInstructionBody): NavRequest {
 
   return {
     route_id: routeIdRaw,
+    map_id: body.map_id ?? body.mapId,
     location: body.location,
     map_position: mapPositionRaw,
     heading_degrees:

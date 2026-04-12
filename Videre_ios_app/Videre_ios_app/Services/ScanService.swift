@@ -72,6 +72,7 @@ class ScanService: NSObject, ObservableObject {
     private var lastKeyframeCacheClearTime: Date = Date()
     private let locationManager = CLLocationManager()
     private var lastKnownLocation: CLLocation?
+    private var lastKnownHeadingDegrees: Double?
     private var scanStartLocation: CLLocation?
 
     override init() {
@@ -81,6 +82,9 @@ class ScanService: NSObject, ObservableObject {
         locationManager.distanceFilter = 1
         locationManager.activityType = .fitness
         locationManager.pausesLocationUpdatesAutomatically = false
+        if CLLocationManager.headingAvailable() {
+            locationManager.headingFilter = 3
+        }
     }
 
     // ── Start ─────────────────────────────────────────
@@ -141,7 +145,12 @@ class ScanService: NSObject, ObservableObject {
                 y: currentPosition.y,
                 z: currentPosition.z,
                 source: "user",
-                timestamp: currentMs()
+                timestamp: currentMs(),
+                headingDegrees: currentHeadingDegrees(),
+                latitude: lastKnownLocation?.coordinate.latitude,
+                longitude: lastKnownLocation?.coordinate.longitude,
+                horizontalAccuracy: lastKnownLocation.map { Float($0.horizontalAccuracy) },
+                verticalAccuracy: lastKnownLocation.map { Float($0.verticalAccuracy) }
             )
             landmarks.append(fallback)
             landmarkCount = landmarks.count
@@ -257,6 +266,7 @@ class ScanService: NSObject, ObservableObject {
     // ── Add user landmark at current position ──────────
     func addLandmark(type: String, label: String) {
         let normalizedType = normalizedLandmarkType(type)
+        let location = lastKnownLocation
         let lm = Landmark(
             type:      normalizedType,
             label:     label,
@@ -264,7 +274,12 @@ class ScanService: NSObject, ObservableObject {
             y:         currentPosition.y,
             z:         currentPosition.z,
             source:    "user",
-            timestamp: currentMs()
+            timestamp: currentMs(),
+            headingDegrees: currentHeadingDegrees(),
+            latitude: location?.coordinate.latitude,
+            longitude: location?.coordinate.longitude,
+            horizontalAccuracy: location.map { Float($0.horizontalAccuracy) },
+            verticalAccuracy: location.map { Float($0.verticalAccuracy) }
         )
         landmarks.append(lm)
         DispatchQueue.main.async {
@@ -316,6 +331,7 @@ class ScanService: NSObject, ObservableObject {
         }
         arkitLandmarkCentroids.append(position)
         let normalizedType = normalizedLandmarkType(type)
+        let location = lastKnownLocation
         let lm = Landmark(
             type:      normalizedType,
             label:     label,
@@ -323,7 +339,12 @@ class ScanService: NSObject, ObservableObject {
             y:         position.y,
             z:         position.z,
             source:    "user",
-            timestamp: currentMs()
+            timestamp: currentMs(),
+            headingDegrees: currentHeadingDegrees(),
+            latitude: location?.coordinate.latitude,
+            longitude: location?.coordinate.longitude,
+            horizontalAccuracy: location.map { Float($0.horizontalAccuracy) },
+            verticalAccuracy: location.map { Float($0.verticalAccuracy) }
         )
         landmarks.append(lm)
         DispatchQueue.main.async {
@@ -334,11 +355,17 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Collect trajectory point (continuous LiDAR locations) ──
     private func addPoint(frame: ARFrame) {
+        let location = lastKnownLocation
         let p = TrajectoryPoint(
             x:             currentPosition.x,
             y:             currentPosition.y,
             z:             currentPosition.z,
             timestamp:     currentMs(),
+            latitude:      location?.coordinate.latitude,
+            longitude:     location?.coordinate.longitude,
+            horizontalAccuracy: location.map { Float($0.horizontalAccuracy) },
+            verticalAccuracy:   location.map { Float($0.verticalAccuracy) },
+            headingDegrees: currentHeadingDegrees(),
             trackingState: trackingString(
                                frame.camera.trackingState)
         )
@@ -824,7 +851,8 @@ class ScanService: NSObject, ObservableObject {
                     x: landmark.x,
                     y: landmark.y,
                     z: landmark.z,
-                    source: landmark.source
+                    source: landmark.source,
+                    headingDegrees: landmark.headingDegrees
                 )
                 syncedCount += 1
             } catch {
@@ -841,6 +869,9 @@ class ScanService: NSObject, ObservableObject {
             locationManager.requestWhenInUseAuthorization()
         case .authorizedWhenInUse, .authorizedAlways:
             locationManager.startUpdatingLocation()
+            if CLLocationManager.headingAvailable() {
+                locationManager.startUpdatingHeading()
+            }
         default:
             break
         }
@@ -854,8 +885,26 @@ class ScanService: NSObject, ObservableObject {
         APIService.shared.refineRouteGeoCalibration(
             latitude: anchorLocation.coordinate.latitude,
             longitude: anchorLocation.coordinate.longitude,
-            headingDegrees: nil
+            headingDegrees: currentHeadingDegrees()
         )
+    }
+
+    private func currentHeadingDegrees() -> Double? {
+        if let heading = lastKnownHeadingDegrees,
+           heading >= 0,
+           heading < 360,
+           heading.isFinite {
+            return heading
+        }
+
+        if let location = lastKnownLocation,
+           location.course >= 0,
+           location.course < 360,
+           location.speed >= 0.8 {
+            return location.course
+        }
+
+        return nil
     }
 
     // ── Helpers ───────────────────────────────────────
@@ -908,6 +957,9 @@ extension ScanService: CLLocationManagerDelegate {
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
             manager.startUpdatingLocation()
+            if CLLocationManager.headingAvailable() {
+                manager.startUpdatingHeading()
+            }
         default:
             break
         }
@@ -925,5 +977,27 @@ extension ScanService: CLLocationManagerDelegate {
         if isScanning && scanStartLocation == nil {
             scanStartLocation = latest
         }
+
+        let course = latest.course
+        if course >= 0,
+           course < 360,
+           latest.speed >= 0.8 {
+            lastKnownHeadingDegrees = course
+        }
+    }
+
+    func locationManager(
+            _ manager: CLLocationManager,
+            didUpdateHeading newHeading: CLHeading
+    ) {
+        let heading = newHeading.trueHeading >= 0
+            ? newHeading.trueHeading
+            : newHeading.magneticHeading
+
+        guard heading >= 0, heading < 360 else {
+            return
+        }
+
+        lastKnownHeadingDegrees = heading
     }
 }

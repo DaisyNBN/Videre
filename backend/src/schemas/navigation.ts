@@ -20,6 +20,8 @@ const coordinateSchema = z.object({
 export const navigationInstructionBodySchema = z.object({
     route_id: z.string().optional(),
     routeId: z.string().optional(),
+    map_id: z.string().optional(),
+    mapId: z.string().optional(),
     location: locationSchema,
     map_position: coordinateSchema.optional(),
     mapPosition: coordinateSchema.optional(),

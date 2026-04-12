@@ -41,6 +41,7 @@ struct MapLandmarkRecord: Identifiable {
     let label: String
     let status: String
     let confidence: Double?
+    let headingDegrees: Double?
 }
 
 struct MapContributionResult {
@@ -1358,6 +1359,7 @@ final class APIService {
             y: Float,
             z: Float,
             source: String = "user",
+            headingDegrees: Double? = nil,
             confidence: Double? = nil
     ) async throws -> String {
         var payload: [String: Any] = [
@@ -1371,6 +1373,13 @@ final class APIService {
 
         if let confidence {
             payload["confidence"] = confidence
+        }
+
+        if let headingDegrees,
+           headingDegrees.isFinite,
+           headingDegrees >= 0,
+           headingDegrees < 360 {
+            payload["headingDegrees"] = headingDegrees
         }
 
         if Constants.apiDryRun {
@@ -1430,7 +1439,8 @@ final class APIService {
                 type: stringValue(row["type"]) ?? "unknown",
                 label: stringValue(row["label"]) ?? "(unlabeled)",
                 status: stringValue(row["status"]) ?? "pending",
-                confidence: numberAsDouble(row["confidence"])
+                confidence: numberAsDouble(row["confidence"]),
+                headingDegrees: numberAsDouble(row["heading_degrees"]) ?? numberAsDouble(row["headingDegrees"])
             )
         }
     }

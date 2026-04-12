@@ -43,9 +43,12 @@ struct TrajectoryPoint: Codable {
     var y:                  Float
     var z:                  Float
     var timestamp:          Int64
-    var horizontalAccuracy: Float?
-    var verticalAccuracy:   Float?
-    var trackingState:      String?
+    var latitude:           Double? = nil
+    var longitude:          Double? = nil
+    var horizontalAccuracy: Float? = nil
+    var verticalAccuracy:   Float? = nil
+    var headingDegrees:     Double? = nil
+    var trackingState:      String? = nil
 }
 
 struct Landmark: Codable {
@@ -56,6 +59,11 @@ struct Landmark: Codable {
     var z:         Float
     var source:    String
     var timestamp: Int64
+    var headingDegrees:     Double? = nil
+    var latitude:           Double? = nil
+    var longitude:          Double? = nil
+    var horizontalAccuracy: Float? = nil
+    var verticalAccuracy:   Float? = nil
 }
 
 struct Keyframe: Codable {
