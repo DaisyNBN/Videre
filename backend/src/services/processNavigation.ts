@@ -99,6 +99,8 @@ type ResolvedRouteNodes = {
   endDistance: number;
 };
 
+const MAX_REASONABLE_CHECKPOINT_DISTANCE_M = 1000;
+
 function isUndefinedTableOrColumn(error: PostgrestLikeError | null | undefined): boolean {
   if (!error) {
     return false;
@@ -329,6 +331,15 @@ async function getNearestCheckpoint(
         nearest = { label: cp.label, distance: Math.round(dist) };
       }
     }
+  }
+
+  if (nearest && nearest.distance > MAX_REASONABLE_CHECKPOINT_DISTANCE_M) {
+    logger.warn(
+      "Ignoring nearest checkpoint for route %s because computed distance %d m looks uncalibrated.",
+      routeId,
+      nearest.distance,
+    );
+    return undefined;
   }
 
   return nearest;
