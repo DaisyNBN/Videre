@@ -7,8 +7,22 @@
 
 import Foundation
 import ARKit
+import CoreLocation
 import simd
 import UIKit
+
+private struct AnchorReuseRecord: Codable {
+    let roomKey: String
+    let roomName: String
+    let latitude: Double
+    let longitude: Double
+    let localX: Float
+    let localY: Float
+    let localZ: Float
+    let mapId: String
+    let routeId: String
+    let recordedAtEpoch: TimeInterval
+}
 
 class ScanService: NSObject, ObservableObject {
 
@@ -19,6 +33,7 @@ class ScanService: NSObject, ObservableObject {
     @Published var pointCount:    Int    = 0
     @Published var landmarkCount: Int    = 0
     @Published var keyframeCount: Int    = 0
+    @Published var waypointCount: Int    = 0 // Route waypoint count for route creation
     @Published var uploadStatus:  String = ""
     @Published var isUploading:   Bool   = false
     @Published var backendScanId: String = ""
@@ -27,6 +42,12 @@ class ScanService: NSObject, ObservableObject {
     @Published var aiDetectionsCount: Int = 0
     @Published var mapLandmarks: [MapLandmarkRecord] = []
     @Published var mapActionStatus: String = ""
+    @Published var anchorReuseStatus: String = ""
+    @Published var currentLatitude: Double = 0.0
+    @Published var currentLongitude: Double = 0.0
+    @Published var locationAccuracy: Double = 0.0
+    @Published var currentAltitude: Double = 0.0
+    @Published var altitudeAccuracy: Double = 0.0
 
     // ── Session data ──────────────────────────────────
     private var scanId:         String            = ""
@@ -37,6 +58,7 @@ class ScanService: NSObject, ObservableObject {
     private var landmarks:      [Landmark]        = []
     private var keyframes:      [Keyframe]        = []
     private var depthSamples:   [DepthSample]     = []
+    private var waypoints:      [Waypoint]        = [] // Route waypoints from rapid LiDAR sampling
     private var sequenceNumber: Int               = 0
     private var retryCount:     Int               = 0
 
@@ -45,6 +67,7 @@ class ScanService: NSObject, ObservableObject {
     private var lastKeyframeTime: TimeInterval = 0
     private var lastDepthTime:    TimeInterval = 0
     private var lastMeshLandmarkTime: TimeInterval = 0
+    private var lastWaypointTime: TimeInterval = 0 // For rapid LiDAR waypoint collection
 
     /// Camera pose samples for trajectory (1 Hz - one per second).
     let POINT_INTERVAL:    TimeInterval = 1.0
@@ -52,12 +75,25 @@ class ScanService: NSObject, ObservableObject {
     let KEYFRAME_INTERVAL: TimeInterval = 5.0
     let DEPTH_INTERVAL:    TimeInterval = 1.0
     private let meshLandmarkInterval: TimeInterval = 2.0
+    /// Rapid waypoint collection for route creation (0.25 seconds - 4 samples per second).
+    private let waypointInterval: TimeInterval = 0.25
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
     /// Rotation threshold to trigger new keyframe: 15 degrees.
     private let rotationThresholdDegrees: Float = 15.0
     /// Position change threshold: 0.5 meters.
     private let positionChangeThreshold: Float = 0.5
+    /// Hard image budget per scan to avoid excessive backend image analysis spend.
+    private let maxImageKeyframesPerScan: Int = 24
+    /// Skip new keyframe image capture when user starts near a known anchor.
+    private var suppressKeyframeCaptureForCurrentScan = false
+    private var activeAnchorReuseRecord: AnchorReuseRecord?
+
+    private let anchorReuseCacheKey = "videre.anchorReuse.cache.v1"
+    private let anchorReuseDistanceMeters: CLLocationDistance = 12
+    private let anchorReuseDedupDistanceMeters: CLLocationDistance = 4
+    private let anchorReuseCacheMaxRecords = 24
+    private let anchorReuseMaxAgeSeconds: TimeInterval = 7 * 24 * 60 * 60
 
     /// Dedupe ARKit mesh landmarks (meters).
     private var arkitLandmarkCentroids: [simd_float3] = []
@@ -69,11 +105,30 @@ class ScanService: NSObject, ObservableObject {
     private var lastKeyframePosition: simd_float3 = .zero
     private var lastKeyframeRotation: simd_quatf = simd_quatf()
     private var lastKeyframeCacheClearTime: Date = Date()
+    private var didLogKeyframeBudgetReached = false
+    private let locationManager = CLLocationManager()
+    private var lastKnownLocation: CLLocation?
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        // Highest accuracy for real-time tracking (~5m indoors)
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        // Real-time updates (0 = no filtering)
+        locationManager.distanceFilter = kCLDistanceFilterNone
+        // High frequency updates for real-time display
+        locationManager.activityType = .fitness
+    }
 
     // ── Start ─────────────────────────────────────────
     func startScan(
             roomName: String,
             userId: String = DeviceIdentity.userId) {
+        startLocationTrackingIfNeeded()
+        if let currentLocation = locationManager.location {
+            lastKnownLocation = currentLocation
+        }
+
         self.scanId         = UUID().uuidString
         self.userId         = userId
         self.roomName       = roomName
@@ -82,6 +137,7 @@ class ScanService: NSObject, ObservableObject {
         self.landmarks      = []
         self.keyframes      = []
         self.depthSamples   = []
+        self.waypoints      = [] // Reset waypoints for new scan
         self.sequenceNumber = 0
         self.retryCount     = 0
         arkitLandmarkCentroids = []
@@ -89,13 +145,18 @@ class ScanService: NSObject, ObservableObject {
         lastKeyframeTime       = 0
         lastDepthTime          = 0
         lastMeshLandmarkTime   = 0
+        lastWaypointTime       = 0 // Reset waypoint timing
         lastKeyframePosition   = .zero
         lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
+        didLogKeyframeBudgetReached = false
+        suppressKeyframeCaptureForCurrentScan = false
+        activeAnchorReuseRecord = nil
         isScanning          = true
         pointCount          = 0
         landmarkCount       = 0
         keyframeCount       = 0
+        waypointCount       = 0 // Reset waypoint count
         uploadStatus        = "Scanning..."
         backendScanId       = ""
         backendMapId        = ""
@@ -103,7 +164,10 @@ class ScanService: NSObject, ObservableObject {
         aiDetectionsCount   = 0
         mapLandmarks        = []
         mapActionStatus     = ""
+        anchorReuseStatus   = ""
         APIService.shared.clearActiveRouteContext()
+
+        configureAnchorReuseForNewScan()
     }
 
     // ── Stop and upload ───────────────────────────────
@@ -137,14 +201,14 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Called from LiDARService every AR frame ────────
     func onARFrame(_ frame: ARFrame) {
-        guard isScanning else { return }
-
         let t   = frame.camera.transform
         currentPosition = simd_float3(
             t.columns.3.x,
             t.columns.3.y,
             t.columns.3.z
         )
+
+        guard isScanning else { return }
 
         let now = frame.timestamp
 
@@ -182,6 +246,12 @@ class ScanService: NSObject, ObservableObject {
             lastMeshLandmarkTime = now
             addMeshClassificationLandmarks(frame: frame)
         }
+
+        // Collect waypoints rapidly for route creation (4 samples per second)
+        if now - lastWaypointTime >= waypointInterval {
+            lastWaypointTime = now
+            collectWaypoint(frame: frame)
+        }
     }
 
     // ── Determine if we should capture a new keyframe ─────────
@@ -190,6 +260,18 @@ class ScanService: NSObject, ObservableObject {
             newRotation: simd_quatf,
             lastTime: TimeInterval,
             now: TimeInterval) -> Bool {
+
+        if suppressKeyframeCaptureForCurrentScan {
+            return false
+        }
+
+        if keyframes.count >= maxImageKeyframesPerScan {
+            if !didLogKeyframeBudgetReached {
+                didLogKeyframeBudgetReached = true
+                print("Keyframe budget reached (\(maxImageKeyframesPerScan)); skipping additional image capture")
+            }
+            return false
+        }
         
         // Always capture for first keyframe
         if keyframes.isEmpty {
@@ -227,7 +309,7 @@ class ScanService: NSObject, ObservableObject {
             _ rot1: simd_quatf,
             _ rot2: simd_quatf) -> Float {
         let diff = simd_inverse(rot1) * rot2
-        let angleRadians = 2.0 * acos(simd_clamp(diff.w, -1.0, 1.0))
+        let angleRadians = 2.0 * acos(simd_clamp(diff.real, -1.0, 1.0))
         let angleDegrees = angleRadians * 180.0 / .pi
         return abs(angleDegrees)
     }
@@ -329,6 +411,10 @@ class ScanService: NSObject, ObservableObject {
 
     // ── Capture keyframe image ────────────────────────
     private func captureKeyframe(frame: ARFrame) {
+        guard keyframes.count < maxImageKeyframesPerScan else {
+            return
+        }
+
         let t     = frame.camera.transform
         let pose  = CameraPose(
             x: t.columns.3.x,
@@ -392,9 +478,47 @@ class ScanService: NSObject, ObservableObject {
         depthSamples.append(ds)
     }
 
+    // ── Collect waypoint from current LiDAR position ──────────
+    /// Rapidly collects route waypoints during scanning.
+    /// Waypoints are sampled from LiDAR/AR positioning at regular intervals (4 Hz).
+    private func collectWaypoint(frame: ARFrame) {
+        let t = frame.camera.transform
+        let ts = currentMs()
+        
+        // Get LiDAR depth confidence from latest depth sample
+        var depthConfidence: Float = 1.0
+        if let depthMap = frame.sceneDepth?.depthMap {
+            depthConfidence = min(1.0, max(0.5, Float(frame.sceneDepth?.confidence ?? 0) / 255.0))
+        }
+        
+        // Classify LiDAR point if mesh is available
+        var classification: String? = nil
+        if let classificationMap = frame.sceneDepth?.confidenceMap {
+            // Simple classification: if we have mesh data, mark as 'mapped'
+            classification = "mapped"
+        }
+        
+        let waypoint = Waypoint(
+            x: t.columns.3.x,
+            y: t.columns.3.y,
+            z: t.columns.3.z,
+            timestamp: ts,
+            depthConfidence: depthConfidence,
+            lidarClassification: classification
+        )
+        
+        waypoints.append(waypoint)
+        DispatchQueue.main.async {
+            self.waypointCount = self.waypoints.count
+        }
+        print("Waypoint collected: \(waypoint.x), \(waypoint.y), \(waypoint.z) - \(waypoints.count) waypoints total")
+    }
+
     // ── Build payload ─────────────────────────────────
     private func buildPayload(endedAt: Date) -> ScanPayload {
-        ScanPayload(
+        let keyframesForUpload = constrainedKeyframesForUpload()
+
+        return ScanPayload(
             scanId:    scanId,
             userId:    userId,
             roomName:  roomName,
@@ -412,14 +536,44 @@ class ScanService: NSObject, ObservableObject {
             ),
             points:         points,
             landmarks:      landmarks,
-            keyframes:      keyframes,
+            keyframes:      keyframesForUpload,
             depthSamples:   depthSamples,
+            waypoints:      waypoints.isEmpty ? nil : waypoints, // Include waypoints if collected
+            createRouteImmediately: waypoints.isEmpty ? nil : true, // Create route from waypoints
             sequenceNumber: sequenceNumber,
             checksum:       buildChecksum(),
             offlineSync:    false,
             retryCount:     retryCount,
             idempotencyKey: "\(scanId)_\(sequenceNumber)"
         )
+    }
+
+    private func constrainedKeyframesForUpload() -> [Keyframe] {
+        guard keyframes.count > maxImageKeyframesPerScan else {
+            return keyframes
+        }
+
+        let stride = max(
+            1,
+            Int(ceil(Double(keyframes.count) / Double(maxImageKeyframesPerScan)))
+        )
+
+        var sampled = keyframes.enumerated().compactMap { index, frame in
+            index % stride == 0 ? frame : nil
+        }
+
+        if let last = keyframes.last,
+           sampled.last?.timestamp != last.timestamp {
+            sampled.append(last)
+        }
+
+        if sampled.count > maxImageKeyframesPerScan,
+           let last = sampled.last {
+            sampled = Array(sampled.prefix(maxImageKeyframesPerScan))
+            sampled[sampled.count - 1] = last
+        }
+
+        return sampled
     }
 
     // ── Upload payload to backend API ─────────────────
@@ -437,9 +591,13 @@ class ScanService: NSObject, ObservableObject {
         var shouldIncrementRetry = false
 
         do {
+            // Choose endpoint based on whether we have waypoints for route creation
+            let hasWaypoints = !waypoints.isEmpty
+            let functionName = hasWaypoints ? "ingest-scan-with-route" : "ingest-scan"
+
             let result = try await APIService.shared
                 .callFunction(
-                    name:    "ingest-scan",
+                    name:    functionName,
                     payload: dict
                 )
 
@@ -520,20 +678,55 @@ class ScanService: NSObject, ObservableObject {
                 mapLandmarks = fetchedMapLandmarks
             }
 
-            let graph = try await APIService.shared.fetchMapGraph(mapId: mapId)
-            let routeId: String
-            if let coordinatePair = selectRouteCoordinates(from: points) {
-                do {
-                    routeId = try await APIService.shared.generateRouteFromCoordinates(
-                        mapId: mapId,
-                        startX: coordinatePair.start.x,
-                        startY: coordinatePair.start.y,
-                        startZ: coordinatePair.start.z,
-                        endX: coordinatePair.end.x,
-                        endY: coordinatePair.end.y,
-                        endZ: coordinatePair.end.z
-                    )
-                } catch {
+            var routeId: String?
+            
+            // Check if route was already created from waypoints
+            if let routeData = result["data"] as? [String: Any],
+               let route = routeData["route"] as? [String: Any],
+               let waypointRouteId = route["routeId"] as? String {
+                routeId = waypointRouteId
+                await MainActor.run {
+                    uploadStatus = "Route created from LiDAR waypoints (\(route["waypointCount"] ?? 0) waypoints)"
+                }
+            }
+
+            // If no route from waypoints, create one from graph
+            if routeId == nil {
+                let graph = try await APIService.shared.fetchMapGraph(mapId: mapId)
+                if let coordinatePair = selectRouteCoordinates(from: points) {
+                    do {
+                        routeId = try await APIService.shared.generateRouteFromCoordinates(
+                            mapId: mapId,
+                            startX: coordinatePair.start.x,
+                            startY: coordinatePair.start.y,
+                            startZ: coordinatePair.start.z,
+                            endX: coordinatePair.end.x,
+                            endY: coordinatePair.end.y,
+                            endZ: coordinatePair.end.z
+                        )
+                        } catch {
+                        guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
+                            finalStatus = "Map created, but graph has insufficient nodes for routing"
+                            await MainActor.run {
+                                uploadStatus = finalStatus
+                                isUploading = false
+                                sequenceNumber += 1
+                            }
+                            return
+                        }
+
+                        await MainActor.run {
+                            uploadStatus =
+                                "Coordinate route failed, falling back to node route: \(error.localizedDescription)"
+                        }
+
+                        routeId = try await APIService.shared.generateRoute(
+                            mapId: mapId,
+                            startNodeId: startNodeId,
+                            endNodeId: endNodeId
+                        )
+                    }
+                } else {
                     guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
                         finalStatus = "Map created, but graph has insufficient nodes for routing"
                         await MainActor.run {
@@ -544,37 +737,19 @@ class ScanService: NSObject, ObservableObject {
                         return
                     }
 
-                    await MainActor.run {
-                        uploadStatus =
-                            "Coordinate route failed, falling back to node route: \(error.localizedDescription)"
-                    }
-
                     routeId = try await APIService.shared.generateRoute(
                         mapId: mapId,
                         startNodeId: startNodeId,
                         endNodeId: endNodeId
                     )
                 }
-            } else {
-                guard let (startNodeId, endNodeId) = selectRouteNodes(from: graph.nodes) else {
-                    finalStatus = "Map created, but graph has insufficient nodes for routing"
-                    await MainActor.run {
-                        uploadStatus = finalStatus
-                        isUploading = false
-                        sequenceNumber += 1
-                    }
-                    return
-                }
-
-                routeId = try await APIService.shared.generateRoute(
-                    mapId: mapId,
-                    startNodeId: startNodeId,
-                    endNodeId: endNodeId
-                )
             }
 
-            await MainActor.run {
-                backendRouteId = routeId
+            if let finalRouteId = routeId {
+                await MainActor.run {
+                    backendRouteId = finalRouteId
+                }
+                persistAnchorReuseRecord(mapId: mapId, routeId: finalRouteId)
             }
 
             finalStatus = "Upload complete — map and route ready"
@@ -782,6 +957,133 @@ class ScanService: NSObject, ObservableObject {
         return syncedCount
     }
 
+    private func startLocationTrackingIfNeeded() {
+        switch locationManager.authorizationStatus {
+        case .notDetermined:
+            locationManager.requestWhenInUseAuthorization()
+        case .authorizedWhenInUse, .authorizedAlways:
+            locationManager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    private func normalizeRoomKey(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func loadAnchorReuseRecords() -> [AnchorReuseRecord] {
+        guard let data = UserDefaults.standard.data(forKey: anchorReuseCacheKey) else {
+            return []
+        }
+
+        guard let records = try? JSONDecoder().decode([AnchorReuseRecord].self, from: data) else {
+            return []
+        }
+
+        return records
+    }
+
+    private func saveAnchorReuseRecords(_ records: [AnchorReuseRecord]) {
+        guard let data = try? JSONEncoder().encode(records) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: anchorReuseCacheKey)
+    }
+
+    private func activeAnchorCandidate(
+            for roomName: String,
+            at currentLocation: CLLocation
+    ) -> (record: AnchorReuseRecord, distanceMeters: CLLocationDistance)? {
+        let roomKey = normalizeRoomKey(roomName)
+        let now = Date().timeIntervalSince1970
+
+        let fresh = loadAnchorReuseRecords().filter {
+            now - $0.recordedAtEpoch <= anchorReuseMaxAgeSeconds
+        }
+
+        let candidates = fresh.filter { $0.roomKey == roomKey }
+        guard !candidates.isEmpty else {
+            return nil
+        }
+
+        let nearest = candidates
+            .map { record -> (record: AnchorReuseRecord, distanceMeters: CLLocationDistance) in
+                let anchorLocation = CLLocation(latitude: record.latitude, longitude: record.longitude)
+                let distance = currentLocation.distance(from: anchorLocation)
+                return (record, distance)
+            }
+            .min(by: { $0.distanceMeters < $1.distanceMeters })
+
+        guard let nearest,
+              nearest.distanceMeters <= anchorReuseDistanceMeters
+        else {
+            return nil
+        }
+
+        return nearest
+    }
+
+    private func configureAnchorReuseForNewScan() {
+        guard let currentLocation = lastKnownLocation else {
+            anchorReuseStatus = "No GPS fix yet; capturing new keyframes"
+            return
+        }
+
+        guard let candidate = activeAnchorCandidate(for: roomName, at: currentLocation) else {
+            anchorReuseStatus = "No nearby saved anchor; capturing new keyframes"
+            return
+        }
+
+        suppressKeyframeCaptureForCurrentScan = true
+        activeAnchorReuseRecord = candidate.record
+        anchorReuseStatus = String(
+            format: "Reusing saved anchor %.0f m away; skipping new keyframe photos",
+            candidate.distanceMeters
+        )
+    }
+
+    private func persistAnchorReuseRecord(mapId: String, routeId: String) {
+        guard let currentLocation = lastKnownLocation else {
+            return
+        }
+
+        let roomKey = normalizeRoomKey(roomName)
+        guard !roomKey.isEmpty else {
+            return
+        }
+
+        let newRecord = AnchorReuseRecord(
+            roomKey: roomKey,
+            roomName: roomName,
+            latitude: currentLocation.coordinate.latitude,
+            longitude: currentLocation.coordinate.longitude,
+            localX: currentPosition.x,
+            localY: currentPosition.y,
+            localZ: currentPosition.z,
+            mapId: mapId,
+            routeId: routeId,
+            recordedAtEpoch: Date().timeIntervalSince1970
+        )
+
+        var records = loadAnchorReuseRecords().filter { existing in
+            let existingLocation = CLLocation(latitude: existing.latitude, longitude: existing.longitude)
+            let distance = existingLocation.distance(from: currentLocation)
+            let sameRoom = existing.roomKey == roomKey
+            return !(sameRoom && distance <= anchorReuseDedupDistanceMeters)
+        }
+
+        records.insert(newRecord, at: 0)
+        if records.count > anchorReuseCacheMaxRecords {
+            records = Array(records.prefix(anchorReuseCacheMaxRecords))
+        }
+
+        saveAnchorReuseRecords(records)
+    }
+
     // ── Helpers ───────────────────────────────────────
     private func currentMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
@@ -823,6 +1125,41 @@ class ScanService: NSObject, ObservableObject {
         case .limited(.insufficientFeatures): return "limited"
         case .notAvailable:                   return "unavailable"
         default:                              return "limited"
+        }
+    }
+}
+
+extension ScanService: CLLocationManagerDelegate {
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    func locationManager(
+            _ manager: CLLocationManager,
+            didUpdateLocations locations: [CLLocation]
+    ) {
+        guard let latest = locations.last else {
+            return
+        }
+
+        lastKnownLocation = latest
+        
+        // Update published variables for real-time display on homepage
+        DispatchQueue.main.async {
+            self.currentLatitude = latest.coordinate.latitude
+            self.currentLongitude = latest.coordinate.longitude
+            self.locationAccuracy = latest.horizontalAccuracy
+            self.currentAltitude = latest.altitude
+            self.altitudeAccuracy = latest.verticalAccuracy
+        }
+
+        if isScanning && keyframes.isEmpty && !suppressKeyframeCaptureForCurrentScan {
+            configureAnchorReuseForNewScan()
         }
     }
 }

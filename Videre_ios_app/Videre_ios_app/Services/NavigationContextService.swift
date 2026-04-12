@@ -74,7 +74,8 @@ final class NavigationContextService: NSObject, ObservableObject {
             "route_id":        selectedRouteId,
             "location":        [
                 "lat": latitude,
-                "lng": longitude
+                "lng": longitude,
+                "altitude": appState.scanService.currentAltitude
             ],
             "heading_degrees": headingDegrees,
             "obstacles":       obstacles,

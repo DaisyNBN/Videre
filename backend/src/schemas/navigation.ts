@@ -9,6 +9,7 @@ const obstacleSchema = z.object({
 const locationSchema = z.object({
     lat: z.number().finite(),
     lng: z.number().finite(),
+    altitude: z.number().finite().optional(),
 });
 
 const coordinateSchema = z.object({

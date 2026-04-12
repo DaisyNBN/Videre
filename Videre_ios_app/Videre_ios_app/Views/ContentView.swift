@@ -59,6 +59,73 @@ struct ContentView: View {
 
                 Divider()
 
+                // ── GPS Location Display ──────────────
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Current Location")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                    
+                    HStack(spacing: 12) {
+                        Image(systemName: "location.circle.fill")
+                            .foregroundColor(.blue)
+                            .font(.system(size: 14))
+                        
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("GPS Coordinates")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.primary)
+                            
+                            Text(String(format: "%.6f° N, %.6f° E", 
+                                       appState.scanService.currentLatitude,
+                                       appState.scanService.currentLongitude))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            
+                            Text("Horizontal Accuracy: ±\(String(format: "%.1f", appState.scanService.locationAccuracy))m")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .background(Color.blue.opacity(0.08))
+                    .cornerRadius(8)
+                    
+                    // Altitude/Elevation
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .foregroundColor(.purple)
+                            .font(.system(size: 14))
+                        
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Elevation")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.primary)
+                            
+                            Text(String(format: "%.1f m above sea level", 
+                                       appState.scanService.currentAltitude))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            
+                            Text("Vertical Accuracy: ±\(String(format: "%.1f", appState.scanService.altitudeAccuracy))m")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .background(Color.purple.opacity(0.08))
+                    .cornerRadius(8)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+
+                Divider()
+
                 // ── Navigation quick actions ──────────
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Navigation")

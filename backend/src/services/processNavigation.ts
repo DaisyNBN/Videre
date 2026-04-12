@@ -524,6 +524,106 @@ export async function rerouteNavigation(
   };
 }
 
+async function getNearbyLandmarks(
+  lat: number,
+  lng: number,
+  altitude: number | undefined,
+  heading: number,
+  radiusMeters = 50
+): Promise<Array<{ type: string; label: string; distance_m: number; direction: string }>> {
+  try {
+    // Fetch landmarks within radius from all maps
+    const { data, error } = await supabase
+      .from("landmarks")
+      .select("id, type, label, x, y, z, room_map_id")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      logger.warn("Failed to fetch landmarks: %o", error);
+      return [];
+    }
+
+    if (!Array.isArray(data) || data.length === 0) {
+      return [];
+    }
+
+    // Calculate distances using haversine for horizontal and altitude for vertical
+    const landmarksWithDistance = data
+      .map((landmark: any) => {
+        const horizontalDist = haversineMeters(lat, lng, landmark.x, landmark.y);
+        
+        // Vertical distance in meters
+        const verticalDiff = altitude !== undefined 
+          ? Math.abs((landmark.z || 0) - altitude) 
+          : 0;
+
+        // Total 3D distance
+        const totalDistance = Math.sqrt(
+          horizontalDist ** 2 + verticalDiff ** 2
+        );
+
+        return {
+          id: landmark.id,
+          type: landmark.type || "unknown",
+          label: landmark.label || landmark.type,
+          x: landmark.x,
+          y: landmark.y,
+          z: landmark.z || 0,
+          horizontalDist,
+          verticalDiff,
+          totalDistance,
+        };
+      })
+      .filter((lm) => lm.horizontalDist <= radiusMeters)
+      .sort((a, b) => a.totalDistance - b.totalDistance)
+      .slice(0, 5);
+
+    // Calculate direction based on heading
+    const result = landmarksWithDistance.map((lm) => {
+      // Calculate bearing from user to landmark
+      const dLng = lm.y - lng;
+      const y = Math.sin(dLng) * Math.cos(lm.x);
+      const x =
+        Math.cos(lat * (Math.PI / 180)) * Math.sin(lm.x * (Math.PI / 180)) -
+        Math.sin(lat * (Math.PI / 180)) *
+          Math.cos(lm.x * (Math.PI / 180)) *
+          Math.cos(dLng);
+
+      let bearing = Math.atan2(y, x) * (180 / Math.PI);
+      bearing = (bearing + 360) % 360;
+
+      // Calculate relative direction (ahead, left, right)
+      let relativeAngle = (bearing - heading + 360) % 360;
+      if (relativeAngle > 180) {
+        relativeAngle -= 360;
+      }
+
+      let direction = "ahead";
+      if (Math.abs(relativeAngle) > 120) {
+        direction = "behind";
+      } else if (relativeAngle < -30) {
+        direction = "right";
+      } else if (relativeAngle > 30) {
+        direction = "left";
+      } else {
+        direction = "center";
+      }
+
+      return {
+        type: lm.type,
+        label: lm.label,
+        distance_m: Math.round(lm.horizontalDist),
+        direction,
+      };
+    });
+
+    return result;
+  } catch (err) {
+    logger.error("Error fetching nearby landmarks: %o", err);
+    return [];
+  }
+}
+
 export async function getNavigationInstruction(
   request: NavRequest
 ): Promise<NavResponse> {
@@ -531,9 +631,17 @@ export async function getNavigationInstruction(
     ? await getNearestCheckpoint(request.route_id, request.location)
     : undefined;
 
+  // Fetch nearby landmarks for enhanced guidance
+  const nearby Landmarks = await getNearbyLandmarks(
+    request.location.lat,
+    request.location.lng,
+    request.location.altitude,
+    request.heading_degrees
+  );
+
   let response: NavResponse;
   try {
-    response = await getGeminiNavResponse(request, nearest);
+    response = await getGeminiNavResponse(request, nearest, nearbyLandmarks);
   } catch (err) {
     logger.error("Gemini failed in navigation pipeline: %o", err);
     response = getFallbackResponse(request.obstacles, nearest);

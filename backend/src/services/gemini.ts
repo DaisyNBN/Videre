@@ -134,7 +134,8 @@ function buildPrompt(
   obstacles: Obstacle[],
   heading: number,
   speed: string,
-  checkpoint?: { label: string; distance: number }
+  checkpoint?: { label: string; distance: number },
+  landmarks?: Array<{ type: string; label: string; distance_m: number; direction: string }>
 ): string {
   const obstacleDesc =
     obstacles.length === 0
@@ -150,12 +151,23 @@ function buildPrompt(
     ? `Next checkpoint: ${checkpoint.label}, approximately ${checkpoint.distance} meters ahead.`
     : "No upcoming checkpoint.";
 
+  const landmarkDesc =
+    landmarks && landmarks.length > 0
+      ? `\nNearby landmarks:\n${landmarks
+          .slice(0, 3)
+          .map(
+            (l) =>
+              `- ${l.label} (${l.type}): ${l.distance_m} meters ${l.direction}`
+          )
+          .join("\n")}`
+      : "";
+
   return `You are a navigation assistant for a blind pedestrian using a smart cane.
 
 Current situation:
 - User is ${speed}
 - Facing heading ${heading}°
-- ${checkpointDesc}
+- ${checkpointDesc}${landmarkDesc}
 
 Detected obstacles:
 ${obstacleDesc}
@@ -170,8 +182,9 @@ Respond with a JSON object (no markdown, no backticks) with these exact fields:
 Rules:
 - If an obstacle is near and center, urgency must be "high" and haptic must be "continuous"
 - If an obstacle is near but to one side, urgency is "medium" and haptic is "double_tap"
+- If a landmark is very close (< 5m) and ahead, include it in the instruction
 - Keep instructions concise — the user hears them while walking
-- Use plain language: "step right", "keep left", "stop", "continue straight"
+- Use plain language: "step right", "keep left", "stop", "continue straight", "door ahead"
 - Never say "I" or refer to yourself`;
 }
 
@@ -212,7 +225,8 @@ function parseVisionPayload(text: string): { landmarks: any[]; obstacles: any[] 
 
 export async function getGeminiNavResponse(
   request: NavRequest,
-  checkpoint?: { label: string; distance: number }
+  checkpoint?: { label: string; distance: number },
+  landmarks?: Array<{ type: string; label: string; distance_m: number; direction: string }>
 ): Promise<NavResponse> {
   if (Date.now() < geminiNavBlockedUntil) {
     return getFallbackResponse(request.obstacles, checkpoint);
@@ -229,7 +243,8 @@ export async function getGeminiNavResponse(
       request.obstacles,
       request.heading_degrees,
       request.speed,
-      checkpoint
+      checkpoint,
+      landmarks
     );
 
     // Fix 3: Timeout — a blind user can't wait 5+ seconds

@@ -9,7 +9,7 @@ export type HazardReport = {
 
 export type NavRequest = {
   route_id: string;
-  location: { lat: number; lng: number };
+  location: { lat: number; lng: number; altitude?: number };
   heading_degrees: number;
   obstacles: Obstacle[];
   speed: "walking" | "stopped";
@@ -64,6 +64,12 @@ export type Landmark = Vector3 & {
   label?: string;
   confidence?: number;
   source?: "user" | "gemini";
+};
+
+export type NearbyLandmark = Landmark & {
+  distance_m: number;
+  vertical_diff_m: number;
+  direction: "left" | "center" | "right" | "ahead" | "behind";
 };
 
 // ==============================
