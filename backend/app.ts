@@ -23,7 +23,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.use('/api', routes);
 
-app.use('/api/*', (_req, res) => {
+app.use('/api', (_req, res) => {
     res.status(404).json(new ApiResponse(false, 'Route not found'));
 });
 
