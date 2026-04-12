@@ -298,7 +298,7 @@ async function persistRouteCheckpoints(
 
 async function getNearestCheckpoint(
   routeId: string,
-  location: { lat: number; lng: number },
+  location: { lat: number; lng: number; altitude?: number },
 ): Promise<{ label: string; distance: number } | undefined> {
   const { data: checkpoints, error } = await supabase
     .from("route_checkpoints")
