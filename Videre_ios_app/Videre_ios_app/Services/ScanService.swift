@@ -54,10 +54,8 @@ class ScanService: NSObject, ObservableObject {
     private let meshLandmarkInterval: TimeInterval = 2.0
     /// Cache expiration: images older than 5 hours can be updated.
     private let imageCacheExpiration: TimeInterval = 5 * 60 * 60  // 5 hours in seconds
-    /// Rotation threshold to trigger new keyframe: 270 degrees (nearly full rotation).
-    private let rotationThresholdDegrees: Float = 270.0
-    /// Position change threshold: 1.5 meters (only capture when user walks significantly further).
-    private let positionChangeThreshold: Float = 1.5
+    /// Position change threshold: 3.0 meters (only capture when user walks much further).
+    private let positionChangeThreshold: Float = 3.0
     /// Dedupe ARKit mesh landmarks (meters).
     private var arkitLandmarkCentroids: [simd_float3] = []
     private let arkitLandmarkMinSpacing: Float = 1.0
@@ -66,7 +64,6 @@ class ScanService: NSObject, ObservableObject {
     // used for adding landmarks
     private(set) var currentPosition: simd_float3 = .zero
     private var lastKeyframePosition: simd_float3 = .zero
-    private var lastKeyframeRotation: simd_quatf = simd_quatf()
     private var lastKeyframeCacheClearTime: Date = Date()
 
     // ── Start ─────────────────────────────────────────
@@ -89,7 +86,6 @@ class ScanService: NSObject, ObservableObject {
         lastDepthTime          = 0
         lastMeshLandmarkTime   = 0
         lastKeyframePosition   = .zero
-        lastKeyframeRotation   = simd_quatf()
         lastKeyframeCacheClearTime = Date()
         isScanning          = true
         pointCount          = 0
@@ -162,7 +158,7 @@ class ScanService: NSObject, ObservableObject {
             now: now) {
             lastKeyframeTime = now
             lastKeyframePosition = currentPosition
-            lastKeyframeRotation = cameraRotation
+
             captureKeyframe(frame: frame)
         }
 
@@ -195,23 +191,13 @@ class ScanService: NSObject, ObservableObject {
             return true
         }
 
-        // Check position change (0.5 meters threshold)
-        // Trigger on new location
+        // Check position change (3.0 meters threshold)
+        // ONLY trigger on significant physical movement, ignore rotation entirely
         let positionDiff = simd_distance(
             lastKeyframePosition,
             newPosition)
         if positionDiff >= positionChangeThreshold {
             print("New keyframe: position changed by \(positionDiff)m")
-            return true
-        }
-
-        // Check rotation change (180 degrees threshold)
-        // Trigger when significant rotation in any direction: horizontal, vertical, or roll
-        let rotationDiff = rotationAngleDifference(
-            lastKeyframeRotation,
-            newRotation)
-        if rotationDiff >= rotationThresholdDegrees {
-            print("New keyframe: rotation changed by \(rotationDiff)°")
             return true
         }
 
@@ -232,16 +218,7 @@ class ScanService: NSObject, ObservableObject {
         return false
     }
 
-    // ── Calculate angle between two rotations ─────────────────
-    // Considers all rotation directions: horizontal (yaw), vertical (pitch), and roll
-    private func rotationAngleDifference(
-            _ rot1: simd_quatf,
-            _ rot2: simd_quatf) -> Float {
-        let diff = simd_inverse(rot1) * rot2
-        let angleRadians = 2.0 * acos(simd_clamp(diff.w, -1.0, 1.0))
-        let angleDegrees = angleRadians * 180.0 / .pi
-        return abs(angleDegrees)
-    }
+
 
     // ── Add user landmark at current position ──────────
     func addLandmark(type: String, label: String) {

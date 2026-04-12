@@ -98,7 +98,40 @@ Output is converted into a structured JSON payload containing:
 
 ---
 
-## 7. Backend Processing (Vision + Gemini)
+## 7. iOS Scanning Process Optimization
+
+The scanning system is optimized to minimize bandwidth while capturing complete spatial coverage:
+
+### Keyframe Capture Strategy
+
+- **Position Threshold: 1.5 meters** - New image captured when user walks 1.5m from last keyframe location
+- **Rotation Threshold: 180 degrees** - Captures image when facing opposite direction (for interior wall mapping)
+- **Time Fallback: 5 seconds maximum** - Captures at least one image every 5 seconds
+- **Cache Expiration: 5 hours** - Allows image refresh after 5 hours for extended scans
+
+### Continuous Data Collection
+
+- **LiDAR Trajectory Points: Every 1 second** - Position recorded at ~1 Hz regardless of keyframe captures
+- **Depth Samples: Every 1 second** - Full depth maps for 3D reconstruction
+- **Result: Dense spatial coverage** - Combined keyframes + continuous depth = complete interior mapping
+
+### Bandwidth Optimization
+
+- Reduces keyframe rate from 2 Hz (old) to smart capture (position + rotation based)
+- Images only captured in different locations, not on head rotation alone
+- ~75% bandwidth reduction while maintaining full 3D data coverage
+- Continuous LiDAR ensures no spatial gaps
+
+### Why This Approach Works for Interior Buildings
+
+- **Position-based keyframes** capture visual features (walls, doors, textures) at key locations
+- **180° rotation captures** walls from opposite angles when user turns around
+- **1-second LiDAR sampling** provides dense depth data between keyframes
+- **Combined result** = Complete interior 3D reconstruction without wasted images
+
+---
+
+## 8. Backend Processing (Vision + Gemini)
 
 The backend sends selected images to Google Cloud Vision API to:
 
@@ -114,7 +147,7 @@ These results are then:
 
 ---
 
-## 8. Data Model
+## 9. Data Model
 
 ### Vector3
 
@@ -146,7 +179,7 @@ These results are then:
 
 ---
 
-## 9. Verification System
+## 10. Verification System
 
 To improve accuracy and safety:
 
@@ -169,7 +202,7 @@ The system provides navigation by:
 
 1. Identifying user position in the graph
 2. Finding destination node
-3. Computing optimal path using A* algorithm
+3. Computing optimal path using A\* algorithm
 4. Translating path into instructions:
    - “Walk forward”
    - “Turn left”
