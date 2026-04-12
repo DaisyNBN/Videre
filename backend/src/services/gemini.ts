@@ -1,5 +1,8 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NavRequest, NavResponse, Obstacle } from "../types";
+import { getFallbackResponse } from "../fallback";
+
+const GEMINI_TIMEOUT_MS = 3000;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? "");
 
@@ -74,17 +77,40 @@ export async function getGeminiNavResponse(
   request: NavRequest,
   checkpoint?: { label: string; distance: number }
 ): Promise<NavResponse> {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  const prompt = buildPrompt(
-    request.obstacles,
-    request.heading_degrees,
-    request.speed,
-    checkpoint
-  );
+    const prompt = buildPrompt(
+      request.obstacles,
+      request.heading_degrees,
+      request.speed,
+      checkpoint
+    );
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
+    // Fix 3: Timeout — a blind user can't wait 5+ seconds
+    const result = await Promise.race([
+      model.generateContent(prompt),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Gemini timeout")), GEMINI_TIMEOUT_MS)
+      ),
+    ]);
 
-  return parseGeminiResponse(text, checkpoint);
+    const text = result.response.text();
+    const response = parseGeminiResponse(text, checkpoint);
+
+    // Fix 1: Safety override — never let AI downgrade a critical urgency
+    const blocking = request.obstacles.find(
+      (o) => o.distance_estimate === "near" && o.position === "center"
+    );
+    if (blocking && response.urgency !== "high") {
+      response.urgency = "high";
+      response.haptic_pattern = "continuous";
+    }
+
+    return response;
+  } catch (err) {
+    // Fix 2: Gemini failed or timed out — fallback keeps the user safe
+    console.error("Gemini error, using fallback:", err);
+    return getFallbackResponse(request.obstacles, checkpoint);
+  }
 }
