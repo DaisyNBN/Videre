@@ -45,6 +45,27 @@ type MapEdgeRow = {
     walkable: boolean;
 };
 
+type PostgrestLikeError = {
+    code?: string;
+    message?: string;
+};
+
+const POINT_DEDUPE_GRID_METERS = 0.35;
+const LANDMARK_DEDUPE_GRID_METERS = 0.75;
+
+function isMissingSchemaError(error: PostgrestLikeError | null | undefined): boolean {
+    if (!error) {
+        return false;
+    }
+
+    return (
+        error.code === "42P01" ||
+        error.code === "42703" ||
+        /relation\s+.+\s+does not exist/i.test(error.message ?? "") ||
+        /column\s+.+\s+does not exist/i.test(error.message ?? "")
+    );
+}
+
 function asNumber(value: unknown, fallback = 0): number {
     if (typeof value === "number" && Number.isFinite(value)) {
         return value;
@@ -156,6 +177,224 @@ async function insertGraphRows(
     };
 }
 
+function pointBucketKey(point: Pick<ScanPoint, "x" | "y" | "z">): string {
+    const bucket = POINT_DEDUPE_GRID_METERS;
+    return [point.x, point.y, point.z]
+        .map((value) => Math.round(value / bucket))
+        .join(":");
+}
+
+function landmarkBucketKey(landmark: Pick<Landmark, "type" | "label" | "x" | "y" | "z">): string {
+    const bucket = LANDMARK_DEDUPE_GRID_METERS;
+    const label = (landmark.label ?? "").trim().toLowerCase();
+    return [
+        landmark.type,
+        label,
+        Math.round(landmark.x / bucket),
+        Math.round(landmark.y / bucket),
+        Math.round(landmark.z / bucket),
+    ].join(":");
+}
+
+function mergeUniquePoints(primary: ScanPoint[], secondary: ScanPoint[]): ScanPoint[] {
+    const seen = new Set<string>();
+    const merged: ScanPoint[] = [];
+
+    for (const point of [...primary, ...secondary]) {
+        const key = pointBucketKey(point);
+        if (seen.has(key)) {
+            continue;
+        }
+
+        seen.add(key);
+        merged.push(point);
+    }
+
+    return merged;
+}
+
+function mergeUniqueLandmarks(primary: Landmark[], secondary: Landmark[]): Landmark[] {
+    const indexByKey = new Map<string, number>();
+    const merged: Landmark[] = [];
+
+    const upsert = (landmark: Landmark) => {
+        const key = landmarkBucketKey(landmark);
+        const existingIndex = indexByKey.get(key);
+
+        if (existingIndex === undefined) {
+            indexByKey.set(key, merged.length);
+            merged.push(landmark);
+            return;
+        }
+
+        const existing = merged[existingIndex];
+        const existingConfidence = typeof existing.confidence === "number" ? existing.confidence : -1;
+        const newConfidence = typeof landmark.confidence === "number" ? landmark.confidence : -1;
+        if (newConfidence > existingConfidence) {
+            merged[existingIndex] = landmark;
+        }
+    };
+
+    for (const landmark of primary) {
+        upsert(landmark);
+    }
+
+    for (const landmark of secondary) {
+        upsert(landmark);
+    }
+
+    return merged;
+}
+
+async function readExistingMapGeometry(mapId: string): Promise<{
+    points: ScanPoint[];
+    landmarks: Landmark[];
+    edgeCount: number;
+}> {
+    const [nodesResult, landmarksResult, edgesResult] = await Promise.all([
+        supabase
+            .from("map_nodes")
+            .select("type, label, x, y, z")
+            .eq("room_map_id", mapId),
+        supabase
+            .from("landmarks")
+            .select("type, label, confidence, source, x, y, z")
+            .eq("room_map_id", mapId),
+        supabase
+            .from("map_edges")
+            .select("id")
+            .eq("room_map_id", mapId),
+    ]);
+
+    if (nodesResult.error || landmarksResult.error || edgesResult.error) {
+        throw new ProcessMapError(500, "Failed to read existing room map geometry");
+    }
+
+    const nodeRows = (nodesResult.data ?? []) as Array<{
+        type: string;
+        label: string | null;
+        x: number;
+        y: number;
+        z: number;
+    }>;
+
+    const existingPoints: ScanPoint[] = nodeRows
+        .filter((node) => node.type !== "landmark")
+        .map((node) => ({
+            x: node.x,
+            y: node.y,
+            z: node.z,
+        }));
+
+    const graphLandmarks: Landmark[] = nodeRows
+        .filter((node) => node.type === "landmark")
+        .map((node) => ({
+            type: "unknown",
+            label: node.label ?? "landmark",
+            source: "user",
+            x: node.x,
+            y: node.y,
+            z: node.z,
+        }));
+
+    const landmarkRows = (landmarksResult.data ?? []) as Array<{
+        type: string;
+        label: string | null;
+        confidence: number | null;
+        source: "user" | "gemini" | null;
+        x: number;
+        y: number;
+        z: number;
+    }>;
+
+    const savedLandmarks: Landmark[] = landmarkRows.map((landmark) => ({
+        type: (landmark.type as Landmark["type"]) ?? "unknown",
+        label: landmark.label ?? "landmark",
+        confidence: typeof landmark.confidence === "number" ? landmark.confidence : undefined,
+        source: landmark.source === "gemini" ? "gemini" : "user",
+        x: landmark.x,
+        y: landmark.y,
+        z: landmark.z,
+    }));
+
+    return {
+        points: existingPoints,
+        landmarks: mergeUniqueLandmarks(graphLandmarks, savedLandmarks),
+        edgeCount: (edgesResult.data ?? []).length,
+    };
+}
+
+async function resetMapGraphData(mapId: string): Promise<void> {
+    const { error: edgeError } = await supabase
+        .from("map_edges")
+        .delete()
+        .eq("room_map_id", mapId);
+
+    if (edgeError) {
+        throw new ProcessMapError(500, "Failed to clear previous map edges");
+    }
+
+    const { error: nodeError } = await supabase
+        .from("map_nodes")
+        .delete()
+        .eq("room_map_id", mapId);
+
+    if (nodeError) {
+        throw new ProcessMapError(500, "Failed to clear previous map nodes");
+    }
+}
+
+async function deleteMapsByIds(mapIds: string[]): Promise<void> {
+    if (mapIds.length === 0) {
+        return;
+    }
+
+    const { error: edgeError } = await supabase
+        .from("map_edges")
+        .delete()
+        .in("room_map_id", mapIds);
+
+    if (edgeError) {
+        throw new ProcessMapError(500, "Failed to remove duplicate map edges");
+    }
+
+    const { error: nodeError } = await supabase
+        .from("map_nodes")
+        .delete()
+        .in("room_map_id", mapIds);
+
+    if (nodeError) {
+        throw new ProcessMapError(500, "Failed to remove duplicate map nodes");
+    }
+
+    const { error: landmarkError } = await supabase
+        .from("landmarks")
+        .delete()
+        .in("room_map_id", mapIds);
+
+    if (landmarkError) {
+        throw new ProcessMapError(500, "Failed to remove duplicate map landmarks");
+    }
+
+    const { error: contributionError } = await supabase
+        .from("map_contributions")
+        .delete()
+        .in("map_id", mapIds);
+
+    if (contributionError && !isMissingSchemaError(contributionError)) {
+        throw new ProcessMapError(500, "Failed to remove duplicate map contributions");
+    }
+
+    const { error: mapError } = await supabase
+        .from("room_maps")
+        .delete()
+        .in("id", mapIds);
+
+    if (mapError) {
+        throw new ProcessMapError(500, "Failed to remove duplicate maps");
+    }
+}
+
 async function getScanPayload(scanId: string): Promise<{
     roomName: string;
     points: ScanPoint[];
@@ -218,26 +457,100 @@ export async function createMap(input: CreateMapInput): Promise<{
     // AI-derived landmarks in the route graph source.
     landmarks = landmarks.filter((landmark) => landmark?.source !== "gemini");
 
-    const { data: insertedMap, error: mapError } = await supabase
+    const { data: existingMaps, error: existingError } = await supabase
         .from("room_maps")
-        .insert({
-            room_name: roomName,
-            created_by: input.createdBy ?? randomUUID(),
-            version: 1,
-        })
-        .select("id, room_name, version")
-        .single();
+        .select("id, room_name, version, created_at")
+        .ilike("room_name", roomName)
+        .order("created_at", { ascending: false });
 
-    if (mapError || !insertedMap?.id) {
-        throw new ProcessMapError(500, "Failed to create map metadata");
+    if (existingError) {
+        throw new ProcessMapError(500, "Failed to check existing room map");
     }
 
-    const graphResult = await insertGraphRows(insertedMap.id, points, landmarks);
+    const existingRows = (existingMaps ?? []) as Array<MapRow & { created_at: string }>;
+    let mapMeta: Pick<MapRow, "id" | "room_name" | "version">;
+
+    if (existingRows.length > 0) {
+        const primaryMap = existingRows[0];
+        const existingGeometry = await readExistingMapGeometry(primaryMap.id);
+        const mergedPoints = mergeUniquePoints(points, existingGeometry.points);
+        const mergedLandmarks = mergeUniqueLandmarks(landmarks, existingGeometry.landmarks);
+
+        const hasNewDetail =
+            mergedPoints.length > existingGeometry.points.length ||
+            mergedLandmarks.length > existingGeometry.landmarks.length;
+
+        points = mergedPoints;
+        landmarks = mergedLandmarks;
+
+        const nextVersion =
+            existingRows.reduce((maxVersion, row) => {
+                return Math.max(maxVersion, asNumber(row.version, 1));
+            }, 1) + 1;
+
+        const duplicateMapIds = existingRows.slice(1).map((row) => row.id);
+        await deleteMapsByIds(duplicateMapIds);
+
+        if (!hasNewDetail) {
+            mapMeta = {
+                id: primaryMap.id,
+                room_name: primaryMap.room_name,
+                version: primaryMap.version,
+            };
+
+            return {
+                id: mapMeta.id,
+                roomName: mapMeta.room_name,
+                version: mapMeta.version,
+                nodeCount: existingGeometry.points.length + existingGeometry.landmarks.length,
+                edgeCount: existingGeometry.edgeCount,
+                sourceScanId: input.scanId ?? null,
+            };
+        }
+
+        await resetMapGraphData(primaryMap.id);
+
+        const { data: updatedMap, error: updateError } = await supabase
+            .from("room_maps")
+            .update({
+                room_name: roomName,
+                created_by: input.createdBy ?? randomUUID(),
+                version: nextVersion,
+                created_at: new Date().toISOString(),
+            })
+            .eq("id", primaryMap.id)
+            .select("id, room_name, version")
+            .single();
+
+        if (updateError || !updatedMap?.id) {
+            throw new ProcessMapError(500, "Failed to merge room rescan into existing map");
+        }
+
+        mapMeta = updatedMap as Pick<MapRow, "id" | "room_name" | "version">;
+    } else {
+        const { data: insertedMap, error: mapError } = await supabase
+            .from("room_maps")
+            .insert({
+                room_name: roomName,
+                created_by: input.createdBy ?? randomUUID(),
+                version: 1,
+            })
+            .select("id, room_name, version")
+            .single();
+
+        if (mapError || !insertedMap?.id) {
+            throw new ProcessMapError(500, "Failed to create map metadata");
+        }
+
+        mapMeta = insertedMap as Pick<MapRow, "id" | "room_name" | "version">;
+    }
+
+    const graphResult = await insertGraphRows(mapMeta.id, points, landmarks);
 
     return {
-        id: insertedMap.id,
-        roomName: insertedMap.room_name,
-        version: insertedMap.version,
+        id: mapMeta.id,
+        roomName: mapMeta.room_name,
+        version: mapMeta.version,
         nodeCount: graphResult.nodeCount,
         edgeCount: graphResult.edgeCount,
         sourceScanId: input.scanId ?? null,

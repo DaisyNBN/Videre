@@ -7,6 +7,7 @@
 
 import Foundation
 import ARKit
+import CoreLocation
 import simd
 import UIKit
 
@@ -67,11 +68,29 @@ class ScanService: NSObject, ObservableObject {
     private(set) var currentPosition: simd_float3 = .zero
     private var lastKeyframePosition: simd_float3 = .zero
     private var lastKeyframeCacheClearTime: Date = Date()
+    private let locationManager = CLLocationManager()
+    private var lastKnownLocation: CLLocation?
+    private var scanStartLocation: CLLocation?
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+        locationManager.distanceFilter = 3
+    }
 
     // ── Start ─────────────────────────────────────────
     func startScan(
             roomName: String,
             userId: String = DeviceIdentity.userId) {
+        startLocationTrackingIfNeeded()
+        if let currentLocation = locationManager.location {
+            lastKnownLocation = currentLocation
+            scanStartLocation = currentLocation
+        } else {
+            scanStartLocation = nil
+        }
+
         self.scanId         = UUID().uuidString
         self.userId         = userId
         self.roomName       = roomName
@@ -597,6 +616,8 @@ class ScanService: NSObject, ObservableObject {
                 backendRouteId = routeId
             }
 
+            applyGpsStartAnchorIfAvailable()
+
             finalStatus = "Upload complete — map and route ready"
         } catch {
             finalStatus = "Error: \(error.localizedDescription)"
@@ -802,6 +823,29 @@ class ScanService: NSObject, ObservableObject {
         return syncedCount
     }
 
+    private func startLocationTrackingIfNeeded() {
+        switch locationManager.authorizationStatus {
+        case .notDetermined:
+            locationManager.requestWhenInUseAuthorization()
+        case .authorizedWhenInUse, .authorizedAlways:
+            locationManager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    private func applyGpsStartAnchorIfAvailable() {
+        guard let anchorLocation = scanStartLocation ?? lastKnownLocation else {
+            return
+        }
+
+        APIService.shared.refineRouteGeoCalibration(
+            latitude: anchorLocation.coordinate.latitude,
+            longitude: anchorLocation.coordinate.longitude,
+            headingDegrees: nil
+        )
+    }
+
     // ── Helpers ───────────────────────────────────────
     private func currentMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
@@ -843,6 +887,31 @@ class ScanService: NSObject, ObservableObject {
         case .limited(.insufficientFeatures): return "limited"
         case .notAvailable:                   return "unavailable"
         default:                              return "limited"
+        }
+    }
+}
+
+extension ScanService: CLLocationManagerDelegate {
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    func locationManager(
+            _ manager: CLLocationManager,
+            didUpdateLocations locations: [CLLocation]
+    ) {
+        guard let latest = locations.last else {
+            return
+        }
+
+        lastKnownLocation = latest
+        if isScanning && scanStartLocation == nil {
+            scanStartLocation = latest
         }
     }
 }
