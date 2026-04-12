@@ -1,9 +1,11 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { ImageAnnotatorClient } from "@google-cloud/vision";
 import { NavRequest, NavResponse, Obstacle } from "../types";
 import { getFallbackResponse } from "../fallback";
 
 
 const GEMINI_TIMEOUT_MS = 3000;
+const visionClient = new ImageAnnotatorClient();
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null;
@@ -146,84 +148,123 @@ export async function analyzeImageWithGemini(
   if (!cameraPose || typeof cameraPose.x !== "number" || typeof cameraPose.y !== "number" || typeof cameraPose.z !== "number") {
     throw new Error("Valid camera pose is required");
   }
-  try {
-    if (!genAI) {
-      throw new Error("Missing GEMINI_API_KEY");
+
+  const toPosition = (xCenter: number): "left" | "center" | "right" => {
+    if (xCenter < 0.33) {
+      return "left";
     }
+    if (xCenter > 0.66) {
+      return "right";
+    }
+    return "center";
+  };
 
-    let mimeType: string;
-    let base64Image: string;
+  const toDistanceEstimate = (area: number): "near" | "mid" | "far" => {
+    if (area >= 0.2) {
+      return "near";
+    }
+    if (area >= 0.07) {
+      return "mid";
+    }
+    return "far";
+  };
 
-    if (imageUrl.startsWith("data:")) {
-      const match = imageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-      if (!match) {
-        throw new Error("Invalid base64 data URI format");
-      }
+  const mapLandmarkType = (description?: string) => {
+    const label = (description ?? "").toLowerCase();
+    if (label.includes("door")) return "door";
+    if (label.includes("wall")) return "wall";
+    if (label.includes("stair") || label.includes("stairs")) return "stair";
+    if (label.includes("elevator") || label.includes("lift")) return "elevator";
+    if (label.includes("exit")) return "exit";
+    if (label.includes("obstacle") || label.includes("barrier")) return "obstacle";
+    return "unknown";
+  };
 
-      mimeType = match[1];
-      base64Image = match[2];
-    } else {
+  try {
+    const image = imageUrl.startsWith("data:")
+      ? (() => {
+        const match = imageUrl.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
+        if (!match) {
+          throw new Error("Invalid base64 data URI format");
+        }
+        return { content: match[1] };
+      })()
+      : /^https?:\/\//i.test(imageUrl)
+        ? (() => {
+          return null;
+        })()
+        : { source: { filename: imageUrl } };
+
+    let imageRequest = image;
+    if (!imageRequest && /^https?:\/\//i.test(imageUrl)) {
       const imageResponse = await fetch(imageUrl);
       if (!imageResponse.ok) {
         throw new Error(`Failed to fetch image: ${imageResponse.status} ${imageResponse.statusText}`);
       }
-
-      mimeType = imageResponse.headers.get("content-type") || "image/jpeg";
       const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
-      base64Image = imageBuffer.toString("base64");
+      imageRequest = { content: imageBuffer.toString("base64") };
     }
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-    const visionPrompt = `You are an indoor accessibility scene parser.
-
-Analyze the provided image and return JSON only (no markdown, no backticks) in this exact shape:
-{
-  "landmarks": [
-    {
-      "type": "door|wall|stair|elevator|obstacle|exit|unknown",
-      "label": "string",
-      "confidence": 0.0,
-      "source": "gemini"
+    if (!imageRequest) {
+      throw new Error("Unable to build image request for Vision API");
     }
-  ],
-  "obstacles": [
-    {
-      "label": "string",
-      "position": "left|center|right",
-      "distance_estimate": "near|mid|far",
-      "confidence": 0.0
-    }
-  ]
-}
 
-Context:
-- cameraPose: ${JSON.stringify(cameraPose)}
-- depthData: ${JSON.stringify(depthData ?? null)}
-
-Rules:
-- Return empty arrays when uncertain.
-- Only use allowed enum values.
-- Keep labels short and practical for blind navigation.
-- Confidence must be a number between 0 and 1.`;
-
-    const result = await Promise.race([
-      model.generateContent([
-        { text: visionPrompt },
-        {
-          inlineData: {
-            mimeType,
-            data: base64Image,
-          },
-        },
-      ]),
+    const [result] = await Promise.race([
+      visionClient.annotateImage({
+        image: imageRequest,
+        features: [
+          { type: "OBJECT_LOCALIZATION" },
+          { type: "LANDMARK_DETECTION" },
+        ],
+      }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Gemini vision timeout")), GEMINI_TIMEOUT_MS)
       ),
     ]);
 
-    const text = result.response.text();
-    return parseVisionPayload(text);
+    const objects = result.localizedObjectAnnotations ?? [];
+    const landmarksDetected = result.landmarkAnnotations ?? [];
+
+    const obstacles = objects.map((obj) => {
+      const vertices = obj.boundingPoly?.normalizedVertices ?? [];
+      const xs = vertices.map((v) => Number(v.x ?? 0));
+      const ys = vertices.map((v) => Number(v.y ?? 0));
+
+      const minX = xs.length ? Math.min(...xs) : 0;
+      const maxX = xs.length ? Math.max(...xs) : 0;
+      const minY = ys.length ? Math.min(...ys) : 0;
+      const maxY = ys.length ? Math.max(...ys) : 0;
+      const area = Math.max(0, maxX - minX) * Math.max(0, maxY - minY);
+      const centerX = (minX + maxX) / 2;
+
+      return {
+        label: obj.name ?? "unknown object",
+        position: toPosition(centerX),
+        distance_estimate: toDistanceEstimate(area),
+        confidence: Number(obj.score ?? 0),
+      };
+    });
+
+    const landmarks = landmarksDetected.map((landmark) => {
+      const latLng = landmark.locations?.[0]?.latLng;
+
+      return {
+        type: mapLandmarkType(landmark.description ?? undefined),
+        label: landmark.description ?? "unknown",
+        confidence: Number(landmark.score ?? 0),
+        source: "gemini",
+        location: latLng
+          ? {
+            latitude: Number(latLng.latitude ?? 0),
+            longitude: Number(latLng.longitude ?? 0),
+          }
+          : null,
+        cameraPose,
+        depthData: depthData ?? null,
+      };
+    });
+
+    return { landmarks, obstacles };
   } catch (err) {
     console.error("Gemini vision analysis failed:", err);
     return { landmarks: [], obstacles: [] };
