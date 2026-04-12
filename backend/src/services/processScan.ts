@@ -93,6 +93,11 @@ type ScanListFallbackRow = {
   processing_status: string | null;
 };
 
+type ScanListSchemaMode = "unknown" | "legacy" | "created_at";
+
+let scanListSchemaMode: ScanListSchemaMode = "unknown";
+let hasLoggedScanListCreatedAtFallback = false;
+
 const MAX_SCAN_KEYFRAMES_ANALYZED = Number.isFinite(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED))
   ? Math.max(1, Math.trunc(Number(process.env.MAX_SCAN_KEYFRAMES_ANALYZED)))
   : 4;
@@ -830,6 +835,45 @@ export async function listScans(filters: {
 }> {
   const safeLimit = Math.min(Math.max(filters.limit ?? 25, 1), 100);
   const safeOffset = Math.max(filters.offset ?? 0, 0);
+  const trimmedRoomName =
+    typeof filters.roomName === "string" && filters.roomName.trim().length > 0
+      ? filters.roomName.trim()
+      : undefined;
+
+  const runCreatedAtFallbackQuery = async (): Promise<ScanListRow[]> => {
+    let fallbackQuery = supabase
+      .from("scans")
+      .select("id, room_name, created_at, processing_status")
+      .order("created_at", { ascending: false })
+      .range(safeOffset, safeOffset + safeLimit - 1);
+
+    if (trimmedRoomName) {
+      fallbackQuery = fallbackQuery.ilike("room_name", `%${trimmedRoomName}%`);
+    }
+
+    const { data: fallbackData, error: fallbackError } = await fallbackQuery;
+    if (fallbackError) {
+      logger.error("Error fetching scans list from database (created_at fallback): %o", fallbackError);
+      throw new ProcessScanError(500, "Failed to list scans");
+    }
+
+    return ((fallbackData ?? []) as ScanListFallbackRow[]).map((row) => ({
+      id: row.id,
+      room_name: row.room_name,
+      started_at: row.created_at,
+      ended_at: row.created_at,
+      processing_status: row.processing_status,
+    }));
+  };
+
+  if (scanListSchemaMode === "created_at") {
+    const scans = await runCreatedAtFallbackQuery();
+    return {
+      scans,
+      limit: safeLimit,
+      offset: safeOffset,
+    };
+  }
 
   let query = supabase
     .from("scans")
@@ -837,41 +881,24 @@ export async function listScans(filters: {
     .order("started_at", { ascending: false })
     .range(safeOffset, safeOffset + safeLimit - 1);
 
-  if (typeof filters.roomName === "string" && filters.roomName.trim().length > 0) {
-    query = query.ilike("room_name", `%${filters.roomName.trim()}%`);
+  if (trimmedRoomName) {
+    query = query.ilike("room_name", `%${trimmedRoomName}%`);
   }
 
   const { data, error } = await query;
 
   if (error) {
     if (isUndefinedColumnError(error)) {
-      logger.info(
-        "scans.started_at/ended_at are unavailable; falling back to created_at ordering.",
-      );
+      scanListSchemaMode = "created_at";
 
-      let fallbackQuery = supabase
-        .from("scans")
-        .select("id, room_name, created_at, processing_status")
-        .order("created_at", { ascending: false })
-        .range(safeOffset, safeOffset + safeLimit - 1);
-
-      if (typeof filters.roomName === "string" && filters.roomName.trim().length > 0) {
-        fallbackQuery = fallbackQuery.ilike("room_name", `%${filters.roomName.trim()}%`);
+      if (!hasLoggedScanListCreatedAtFallback) {
+        logger.info(
+          "scans.started_at/ended_at are unavailable; using created_at ordering for listScans.",
+        );
+        hasLoggedScanListCreatedAtFallback = true;
       }
 
-      const { data: fallbackData, error: fallbackError } = await fallbackQuery;
-      if (fallbackError) {
-        logger.error("Error fetching scans list from database (created_at fallback): %o", fallbackError);
-        throw new ProcessScanError(500, "Failed to list scans");
-      }
-
-      const scans = ((fallbackData ?? []) as ScanListFallbackRow[]).map((row) => ({
-        id: row.id,
-        room_name: row.room_name,
-        started_at: row.created_at,
-        ended_at: row.created_at,
-        processing_status: row.processing_status,
-      }));
+      const scans = await runCreatedAtFallbackQuery();
 
       return {
         scans,
@@ -883,6 +910,8 @@ export async function listScans(filters: {
     logger.error("Error fetching scans list from database: %o", error);
     throw new ProcessScanError(500, "Failed to list scans");
   }
+
+  scanListSchemaMode = "legacy";
 
   return {
     scans: (data ?? []) as ScanListRow[],
