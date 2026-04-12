@@ -961,6 +961,9 @@ class ScanService: NSObject, ObservableObject {
         switch locationManager.authorizationStatus {
         case .notDetermined:
             locationManager.requestWhenInUseAuthorization()
+            // Start updating location immediately after requesting permission
+            // The locationManagerDidChangeAuthorization will be called once user responds
+            locationManager.startUpdatingLocation()
         case .authorizedWhenInUse, .authorizedAlways:
             locationManager.startUpdatingLocation()
         default:

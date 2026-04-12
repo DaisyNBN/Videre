@@ -76,12 +76,12 @@ struct ContentView: View {
                                 .foregroundColor(.primary)
                             
                             Text(String(format: "%.6f° N, %.6f° E", 
-                                       appState.scanService.currentLatitude,
-                                       appState.scanService.currentLongitude))
+                                       navigation.latitude,
+                                       navigation.longitude))
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.secondary)
                             
-                            Text("Horizontal Accuracy: ±\(String(format: "%.1f", appState.scanService.locationAccuracy))m")
+                            Text("Heading: \(String(format: "%.0f", navigation.headingDegrees))°")
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.secondary)
                         }
@@ -93,7 +93,7 @@ struct ContentView: View {
                     .background(Color.blue.opacity(0.08))
                     .cornerRadius(8)
                     
-                    // Altitude/Elevation
+                    // Display ScanService altitude when scanning, or show navigation altitude
                     HStack(spacing: 12) {
                         Image(systemName: "arrow.up.circle.fill")
                             .foregroundColor(.purple)

@@ -29,7 +29,12 @@ final class NavigationContextService: NSObject, ObservableObject {
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+        // Best accuracy (~5m indoors) for precise real-time location display
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        // Real-time distance filter (0 = no delay between updates)
+        manager.distanceFilter = kCLDistanceFilterNone
+        // High frequency tracking for navigation
+        manager.activityType = .fitness
         if CLLocationManager.headingAvailable() {
             manager.headingFilter = 5
         }
